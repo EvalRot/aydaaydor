@@ -1,5 +1,6 @@
 package aydaaydor.config;
 
+import burp.api.montoya.http.message.params.HttpParameterType;
 import burp.api.montoya.logging.Logging;
 import burp.api.montoya.persistence.Preferences;
 
@@ -13,11 +14,13 @@ public class AydaConfig {
     private static final String PREF_DEDUP_MODE = PREF_PREFIX + "dedup.mode"; // STRICT | CONTENT_AWARE
     private static final String PREF_DEDUP_TTL_MS = PREF_PREFIX + "dedup.ttl_ms"; // long ms
     private static final String PREF_DEDUP_LRU = PREF_PREFIX + "dedup.lru"; // int entries
+    private static final String PREF_IGNORED_PARAMS = PREF_PREFIX + "ignored.params"; // lines of TYPE:name
 
     private final Preferences prefs;
     private final Logging log;
     private final Map<String, IdGroup> groups = new LinkedHashMap<>();
     private final List<String> deniedStrings = new ArrayList<>();
+    private final EnumMap<HttpParameterType, Set<String>> ignoredParams = new EnumMap<>(HttpParameterType.class);
     private volatile boolean enabled = true;
     private volatile DedupMode dedupMode = DedupMode.STRICT;
     private volatile long dedupTtlMillis = 12L * 60 * 60 * 1000; // 12h default
@@ -53,6 +56,34 @@ public class AydaConfig {
 
     public synchronized List<String> getDeniedStrings() {
         return new ArrayList<>(deniedStrings);
+    }
+
+    // Ignored parameters management
+    public synchronized void addIgnoredParam(HttpParameterType type, String name) {
+        if (type == null || name == null) return;
+        String key = name.trim();
+        if (key.isEmpty()) return;
+        key = key.toLowerCase(java.util.Locale.ROOT);
+        ignoredParams.computeIfAbsent(type, t -> new LinkedHashSet<>()).add(key);
+    }
+
+    public synchronized void removeIgnoredParam(HttpParameterType type, String name) {
+        if (type == null || name == null) return;
+        Set<String> set = ignoredParams.get(type);
+        if (set != null) set.remove(name.trim().toLowerCase(java.util.Locale.ROOT));
+    }
+
+    public synchronized boolean isParamIgnored(HttpParameterType type, String name) {
+        if (type == null || name == null) return false;
+        Set<String> set = ignoredParams.get(type);
+        if (set == null) return false;
+        return set.contains(name.trim().toLowerCase(java.util.Locale.ROOT));
+    }
+
+    public synchronized Map<HttpParameterType, Set<String>> allIgnoredParams() {
+        Map<HttpParameterType, Set<String>> copy = new EnumMap<>(HttpParameterType.class);
+        for (var e : ignoredParams.entrySet()) copy.put(e.getKey(), new LinkedHashSet<>(e.getValue()));
+        return copy;
     }
 
     public synchronized boolean isEnabled() { return enabled; }
@@ -105,6 +136,26 @@ public class AydaConfig {
                     if (!d.isEmpty()) deniedStrings.add(d);
                 }
             }
+
+            // Ignored params
+            ignoredParams.clear();
+            String ignored = prefs.getString(PREF_IGNORED_PARAMS);
+            if (ignored != null) {
+                for (String line : ignored.split("\n")) {
+                    line = line.trim();
+                    if (line.isEmpty()) continue;
+                    int colon = line.indexOf(':');
+                    if (colon <= 0 || colon + 1 >= line.length()) continue;
+                    String typeStr = line.substring(0, colon).trim();
+                    String name = line.substring(colon + 1).trim();
+                    try {
+                        HttpParameterType type = HttpParameterType.valueOf(typeStr);
+                        addIgnoredParam(type, name);
+                    } catch (Exception ignoredEx) {
+                        // skip invalid entries
+                    }
+                }
+            }
         } catch (Exception e) {
             log.logToError("AydaAydor: Failed to load preferences: " + e);
         }
@@ -129,6 +180,19 @@ public class AydaConfig {
             prefs.setString(PREF_GROUPS, String.join(",", keys));
 
             prefs.setString(PREF_DENIED, String.join("\n", deniedStrings));
+
+            // Save ignored params
+            List<String> lines = new ArrayList<>();
+            for (var e : ignoredParams.entrySet()) {
+                HttpParameterType type = e.getKey();
+                if (type == null) continue;
+                List<String> names = new ArrayList<>(e.getValue());
+                Collections.sort(names);
+                for (String n : names) {
+                    lines.add(type.name() + ":" + n);
+                }
+            }
+            prefs.setString(PREF_IGNORED_PARAMS, String.join("\n", lines));
         } catch (Exception e) {
             log.logToError("AydaAydor: Failed to save preferences: " + e);
         }

@@ -27,7 +27,6 @@ import static burp.api.montoya.scanner.audit.issues.AuditIssue.auditIssue;
 import static java.util.stream.Collectors.toList;
 
 public class AydaScanner implements HttpHandler, ScannerControls {
-    private static final String SCAN_HEADER = "X-AydaAydor-Scan";
 
     private final MontoyaApi api;
     private final AydaConfig config;
@@ -35,6 +34,26 @@ public class AydaScanner implements HttpHandler, ScannerControls {
     // Dedup caches (no inFlight as per requirements)
     private final TtlLruCache seen;
     private final TtlLruCache reported;
+
+    // Headers to ignore when extracting candidate values (case-insensitive)
+    private static final java.util.Set<String> IGNORED_HEADER_NAMES = new java.util.HashSet<>(java.util.List.of(
+            "host",
+            "cookie",
+            "content-length",
+            "sec-ch-ua-platform",
+            "sec-ch-ua",
+            "sec-ch-ua-mobile",
+            "content-type",
+            "user-agent",
+            "accept",
+            "origin",
+            "sec-fetch-site",
+            "sec-fetch-mode",
+            "sec-fetch-dest",
+            "referer",
+            "accept-encoding",
+            "priority"
+    ));
 
     public AydaScanner(MontoyaApi api, AydaConfig config) {
         this.api = api;
@@ -72,8 +91,17 @@ public class AydaScanner implements HttpHandler, ScannerControls {
         HttpRequest baseReq = responseReceived.initiatingRequest();
         HttpResponse baseResp = responseReceived;
 
-        // skip our own
-        if (baseReq.hasHeader(SCAN_HEADER)) return ResponseReceivedAction.continueWith(responseReceived);
+        // Only scan in-scope traffic
+        if (baseReq == null || !baseReq.isInScope()) {
+            return ResponseReceivedAction.continueWith(responseReceived);
+        }
+
+        // Skip static assets by URL path extension
+        String pathNoQuery = baseReq.pathWithoutQuery();
+        if (pathNoQuery != null && isStaticAssetPath(pathNoQuery)) {
+            return ResponseReceivedAction.continueWith(responseReceived);
+        }
+
 
         // find all matching occurrences across all groups and scan each
         List<Match> matches = findAllMatches(baseReq, config.allGroups());
@@ -90,6 +118,19 @@ public class AydaScanner implements HttpHandler, ScannerControls {
         return ResponseReceivedAction.continueWith(responseReceived);
     }
 
+    private boolean isStaticAssetPath(String path) {
+        String p = path.toLowerCase(java.util.Locale.ROOT);
+        return p.endsWith(".gif")
+                || p.endsWith(".jpg")
+                || p.endsWith(".png")
+                || p.endsWith(".ico")
+                || p.endsWith(".css")
+                || p.endsWith(".woff")
+                || p.endsWith(".woff2")
+                || p.endsWith(".ttf")
+                || p.endsWith(".svg");
+    }
+
     private void runIdorChecks(HttpRequest baseReq, HttpResponse baseResp, Match match, String scanKey) {
         try {
             String baseBody = baseResp.bodyToString();
@@ -104,14 +145,14 @@ public class AydaScanner implements HttpHandler, ScannerControls {
 
             // Build and send dummy request first
             HttpRequest dummyReq = applyReplacement(baseReq, match, dummy);
-            HttpRequestResponse dummyRR = api.http().sendRequest(tag(dummyReq));
+            HttpRequestResponse dummyRR = api.http().sendRequest(dummyReq);
             HttpResponse dummyResp = dummyRR.response();
             String dummyBody = dummyResp.bodyToString();
             int dummyLen = safeContentLength(dummyResp, dummyBody);
 
             for (String id : otherIds) {
                 HttpRequest testReq = applyReplacement(baseReq, match, id);
-                HttpRequestResponse testRR = api.http().sendRequest(tag(testReq));
+                HttpRequestResponse testRR = api.http().sendRequest(testReq);
                 HttpResponse testResp = testRR.response();
                 String testBody = testResp.bodyToString();
                 int testLen = safeContentLength(testResp, testBody);
@@ -179,10 +220,6 @@ public class AydaScanner implements HttpHandler, ScannerControls {
         String lower = haystack.toLowerCase();
         for (String n : needlesLower) if (lower.contains(n)) return true;
         return false;
-    }
-
-    private HttpRequest tag(HttpRequest req) {
-        return req.withUpdatedHeader(SCAN_HEADER, "1");
     }
 
     private void reportIssue(HttpRequest baseReq, HttpResponse baseResp, HttpRequestResponse evidence, Match match, String toId, String dummy) {
@@ -296,18 +333,26 @@ public class AydaScanner implements HttpHandler, ScannerControls {
         return Integer.toHexString(h);
     }
 
+    private static boolean isIgnoredHeader(String name) {
+        if (name == null) return false;
+        String lower = name.trim().toLowerCase(java.util.Locale.ROOT);
+        return IGNORED_HEADER_NAMES.contains(lower);
+    }
+
     private List<Match> findAllMatches(HttpRequest req, List<IdGroup> groups) {
         // Collect candidate value occurrences
         List<Candidate> candidates = new ArrayList<>();
         // Parameters (all types including URL, BODY, JSON, COOKIE, MULTIPART_ATTRIBUTE)
         for (var p : req.parameters()) {
+            try {
+                if (config.isParamIgnored(p.type(), p.name())) continue;
+            } catch (Throwable ignored) {}
             candidates.add(Candidate.forParam(p));
         }
         // Headers
         for (HttpHeader h : req.headers()) {
             String hn = h.name();
-            if (hn.equalsIgnoreCase("Host")) continue;     // skip host header
-            if (hn.equalsIgnoreCase("Referer")) continue;  // skip referer header
+            if (isIgnoredHeader(hn)) continue; // skip noisy/standard headers
             candidates.add(Candidate.forHeader(hn, h.value()));
         }
         // Path segments

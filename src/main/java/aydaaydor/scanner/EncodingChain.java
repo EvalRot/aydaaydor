@@ -75,6 +75,9 @@ class EncodingChain {
             }
 
             for (String sample : samples) {
+                // First searching strategy: the method uses reversed decode-step chains to perform encoding
+                // of the search (wanted) value and the look for it inside the candidate value. Is used when only  
+                // a specific part of a candidate value is encoded e.g. Base64URL segment inside a JWT-like
                 String enc = chain.encode(wanted, sample);
                 int idx = candidate.indexOf(enc);
                 if (idx >= 0) {
@@ -82,7 +85,8 @@ class EncodingChain {
                 }
             }
 
-            // Additionally: try decode-then-search for cases like Base64 wrapping multiple values
+            // Second searching strategy: decode the whole candidate and then search for a target (wanted) value
+            // inside it. Is used when entire candidate value is base64-encoded JSON for example
             String decoded = chain.decodeAll(candidate);
             if (decoded != null) {
                 int dIdx = decoded.indexOf(wanted);
@@ -129,7 +133,9 @@ class EncodingChain {
     }
 
     String encode(String value, String sampleEncodedForm) {
-        // Invert the decode steps to build encode chain
+        // The method uses reversed chains of encoding steps to perform encoding of the search value
+        // and the look for it inside the candidate. Is used when only a specific part of a candidate value is encoded
+        // e.g. Base64URL segment inside a JWT-like
         List<Step> inv = new ArrayList<>(steps);
         Collections.reverse(inv);
         String out = value;

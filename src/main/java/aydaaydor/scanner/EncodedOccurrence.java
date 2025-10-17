@@ -11,7 +11,7 @@ class EncodedOccurrence {
     final String decodedFull;
     final int decodedStart;
 
-    // Encoded-fragment constructor
+    // Encode a target value and then search in encoded candidate case constructor
     EncodedOccurrence(EncodingChain chain, String fragment, int startIndex) {
         this.chain = chain;
         this.fragment = fragment;
@@ -21,12 +21,12 @@ class EncodedOccurrence {
         this.decodedStart = -1;
     }
 
-    // Decode-then-search constructor
+    // Decode entire candidate value and then search for a target value in it constructor
     EncodedOccurrence(EncodingChain chain, String decodedFull, int decodedStart, boolean reencodeWhole) {
         this.chain = chain;
         this.fragment = null;
         this.startIndex = -1;
-        this.reencodeWhole = reencodeWhole;
+        this.reencodeWhole = reencodeWhole; // is needed for reencoding the whole candidate after the target value is replaced with other ID from a group
         this.decodedFull = decodedFull;
         this.decodedStart = decodedStart;
     }

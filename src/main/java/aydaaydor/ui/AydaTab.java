@@ -4,6 +4,7 @@ import aydaaydor.config.AydaConfig;
 import aydaaydor.config.DedupMode;
 import aydaaydor.config.IdGroup;
 import aydaaydor.scanner.ScannerControls;
+import burp.api.montoya.http.message.params.HttpParameterType;
 import burp.api.montoya.logging.Logging;
 
 import javax.swing.*;
@@ -27,6 +28,12 @@ public class AydaTab extends JPanel {
     private final JComboBox<DedupMode> dedupModeBox = new JComboBox<>(DedupMode.values());
     private final JTextField ttlHoursField = new JTextField(6);
     private final JTextField lruSizeField = new JTextField(6);
+
+    // Ignored parameters UI
+    private final DefaultListModel<String> ignoredModel = new DefaultListModel<>();
+    private final JList<String> ignoredList = new JList<>(ignoredModel);
+    private final JComboBox<HttpParameterType> paramTypeBox = new JComboBox<>(HttpParameterType.values());
+    private final JTextField paramNameField = new JTextField(16);
 
     public AydaTab(AydaConfig config, Logging log, ScannerControls controls) {
         super(new BorderLayout());
@@ -54,7 +61,7 @@ public class AydaTab extends JPanel {
         }));
         left.add(btns, BorderLayout.SOUTH);
 
-        // Right: group details and denied strings
+        // Right: group details, denied strings, ignored parameters
         JPanel right = new JPanel();
         right.setLayout(new BoxLayout(right, BoxLayout.Y_AXIS));
 
@@ -115,9 +122,53 @@ public class AydaTab extends JPanel {
             dedupPanel.add(row1);
             dedupPanel.add(row2);
 
+            // Ignored parameters panel
+            JPanel ignoredPanel = new JPanel(new BorderLayout());
+            ignoredPanel.setBorder(new TitledBorder("Ignored parameters (type + name)"));
+            ignoredList.setSelectionMode(ListSelectionModel.MULTIPLE_INTERVAL_SELECTION);
+            ignoredPanel.add(new JScrollPane(ignoredList), BorderLayout.CENTER);
+            JPanel ignoredSouth = new JPanel(new FlowLayout(FlowLayout.LEFT));
+            ignoredSouth.add(new JLabel("Type:"));
+            ignoredSouth.add(paramTypeBox);
+            ignoredSouth.add(new JLabel("Name:"));
+            ignoredSouth.add(paramNameField);
+            ignoredSouth.add(new JButton(new AbstractAction("Add Ignore") {
+                @Override public void actionPerformed(ActionEvent e) {
+                    HttpParameterType t = (HttpParameterType) paramTypeBox.getSelectedItem();
+                    String n = paramNameField.getText();
+                    if (t == null || n == null || n.trim().isEmpty()) return;
+                    config.addIgnoredParam(t, n.trim());
+                    config.save();
+                    reloadIgnoredParams();
+                    paramNameField.setText("");
+                }
+            }));
+            ignoredSouth.add(new JButton(new AbstractAction("Remove Selected") {
+                @Override public void actionPerformed(ActionEvent e) {
+                    for (String sel : ignoredList.getSelectedValuesList()) {
+                        int c = sel.indexOf(':');
+                        if (c > 0 && c + 1 < sel.length()) {
+                            String type = sel.substring(0, c).trim();
+                            String name = sel.substring(c + 1).trim();
+                            try {
+                                HttpParameterType t = HttpParameterType.valueOf(type);
+                                config.removeIgnoredParam(t, name);
+                            } catch (Exception ignored) {
+                                // skip bad entries
+                            }
+                        }
+                    }
+                    config.save();
+                    reloadIgnoredParams();
+                }
+            }));
+            ignoredPanel.add(ignoredSouth, BorderLayout.SOUTH);
+
             right.add(groupPanel);
             right.add(Box.createVerticalStrut(8));
             right.add(deniedPanel);
+            right.add(Box.createVerticalStrut(8));
+            right.add(ignoredPanel);
             right.add(Box.createVerticalStrut(8));
             right.add(enabledBox);
             right.add(Box.createVerticalStrut(8));
@@ -136,7 +187,22 @@ public class AydaTab extends JPanel {
             dedupModeBox.setSelectedItem(config.getDedupMode());
             ttlHoursField.setText(Long.toString(Math.max(1, config.getDedupTtlMillis() / (60 * 60 * 1000))));
             lruSizeField.setText(Integer.toString(config.getDedupLruMax()));
+            reloadIgnoredParams();
         }
+
+    private void reloadIgnoredParams() {
+        ignoredModel.clear();
+        var map = config.allIgnoredParams();
+        java.util.List<String> items = new java.util.ArrayList<>();
+        for (var e : map.entrySet()) {
+            if (e.getValue() == null) continue;
+            java.util.List<String> names = new java.util.ArrayList<>(e.getValue());
+            java.util.Collections.sort(names);
+            for (String n : names) items.add(e.getKey().name() + ": " + n);
+        }
+        java.util.Collections.sort(items);
+        for (String s : items) ignoredModel.addElement(s);
+    }
 
     private void onGroupSelected() {
         String name = groupsList.getSelectedValue();
