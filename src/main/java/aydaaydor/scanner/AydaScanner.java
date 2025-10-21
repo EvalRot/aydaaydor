@@ -18,6 +18,7 @@ import burp.api.montoya.http.message.responses.HttpResponse;
 import burp.api.montoya.scanner.audit.issues.AuditIssue;
 
 import java.util.*;
+import com.google.gson.*;
 import java.util.concurrent.*;
 import java.util.regex.Pattern;
 
@@ -224,18 +225,50 @@ public class AydaScanner implements HttpHandler, ScannerControls {
     }
 
     private boolean responsesDifferent(HttpResponse aResp, String aBody, HttpResponse bResp, String bBody) {
-        // If body looks like JSON for both, compare stable hashes
+        // If body looks like JSON for both, parse, prune ignored keys, and compare
         boolean aJson = looksLikeJson(aBody);
         boolean bJson = looksLikeJson(bBody);
         if (aJson && bJson) {
-            String ha = stableBodyHash(aBody);
-            String hb = stableBodyHash(bBody);
-            return !Objects.equals(ha, hb);
+            try {
+                JsonElement ea = JsonParser.parseString(aBody);
+                JsonElement eb = JsonParser.parseString(bBody);
+                Set<String> ignored = new LinkedHashSet<>(config.getIgnoredJsonKeys()); // case-sensitive
+                ea = pruneIgnoredJsonKeys(ea, ignored);
+                eb = pruneIgnoredJsonKeys(eb, ignored);
+                return !Objects.equals(ea, eb);
+            } catch (Throwable parseEx) {
+                // Fallback to hash-based compare on failure
+                String ha = stableBodyHash(aBody);
+                String hb = stableBodyHash(bBody);
+                return !Objects.equals(ha, hb);
+            }
         }
         // Otherwise, fall back to content-length compare
         int la = safeContentLength(aResp, aBody);
         int lb = safeContentLength(bResp, bBody);
         return la != lb;
+    }
+
+    private JsonElement pruneIgnoredJsonKeys(JsonElement node, Set<String> ignore) {
+        if (node == null || ignore == null || ignore.isEmpty()) return node;
+        if (node.isJsonObject()) {
+            JsonObject obj = node.getAsJsonObject();
+            JsonObject out = new JsonObject();
+            for (Map.Entry<String, JsonElement> e : obj.entrySet()) {
+                String name = e.getKey();
+                if (ignore.contains(name)) continue;
+                JsonElement child = pruneIgnoredJsonKeys(e.getValue(), ignore);
+                out.add(name, child);
+            }
+            return out;
+        } else if (node.isJsonArray()) {
+            JsonArray arr = node.getAsJsonArray();
+            JsonArray out = new JsonArray();
+            for (JsonElement el : arr) out.add(pruneIgnoredJsonKeys(el, ignore));
+            return out;
+        } else {
+            return node;
+        }
     }
 
     private boolean looksLikeJson(String s) {

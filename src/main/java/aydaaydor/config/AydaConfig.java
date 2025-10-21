@@ -40,6 +40,7 @@ public class AydaConfig {
     private final List<String> pathExcludeRegex = new ArrayList<>();
     private final List<String> ignoredHeaders = new ArrayList<>();
     private final List<String> skipExtensions = new ArrayList<>();
+    private final List<String> ignoredJsonKeys = new ArrayList<>();
     private volatile int requestTimeoutMs = 10000;
     private volatile int delayMsBetweenMutations = 0;
     private volatile int maxMutationsPerBase = 20;
@@ -127,6 +128,14 @@ public class AydaConfig {
             String v = s.trim().toLowerCase(Locale.ROOT);
             if (!v.startsWith(".")) v = "." + v;
             skipExtensions.add(v);
+        }
+    }
+    public synchronized List<String> getIgnoredJsonKeys() { return new ArrayList<>(ignoredJsonKeys); }
+    public synchronized void setIgnoredJsonKeys(List<String> list) {
+        ignoredJsonKeys.clear();
+        if (list != null) for (String s : list) if (s != null && !s.isBlank()) {
+            String v = s.trim(); // JSON keys are case-sensitive; do not lowercase
+            if (!ignoredJsonKeys.contains(v)) ignoredJsonKeys.add(v);
         }
     }
     public synchronized int getRequestTimeoutMs() { return requestTimeoutMs; }
@@ -344,6 +353,13 @@ public class AydaConfig {
                 setSkipExtensions(se);
             }
 
+            Object ignoredJson = root.get("ignored_json_keys");
+            if (ignoredJson instanceof Collection) {
+                List<String> keys = new ArrayList<>();
+                for (Object o : (Collection<?>) ignoredJson) if (o != null) keys.add(String.valueOf(o));
+                setIgnoredJsonKeys(keys);
+            }
+
             Object paths = root.get("path_exclude_regex");
             if (paths instanceof Collection) {
                 List<String> pe = new ArrayList<>();
@@ -414,6 +430,7 @@ public class AydaConfig {
         root.put("denied_strings", getDeniedStrings());
         root.put("ignored_headers", getIgnoredHeaders());
         root.put("skip_extensions", getSkipExtensions());
+        root.put("ignored_json_keys", getIgnoredJsonKeys());
         root.put("path_exclude_regex", getPathExcludeRegex());
         List<Map<String,Object>> groupsOut = new ArrayList<>();
         for (IdGroup g : allGroups()) {

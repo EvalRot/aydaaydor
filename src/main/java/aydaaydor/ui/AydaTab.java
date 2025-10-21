@@ -46,6 +46,11 @@ public class AydaTab extends JPanel {
 
     private final JTextArea pathExcludeArea = new JTextArea(5, 40);
 
+    // Ignored JSON keys UI (for response comparison)
+    private final DefaultListModel<String> jsonKeysModel = new DefaultListModel<>();
+    private final JList<String> jsonKeysList = new JList<>(jsonKeysModel);
+    private final JTextField jsonKeyField = new JTextField(16);
+
     // Performance UI
     private final JTextField timeoutMsField = new JTextField(6);
     private final JTextField delayMsField = new JTextField(6);
@@ -260,11 +265,43 @@ public class AydaTab extends JPanel {
             }));
             pathPanel.add(pathSouth, BorderLayout.SOUTH);
 
+            // Ignored JSON keys panel
+            JPanel jsonPanel = new JPanel(new BorderLayout());
+            jsonPanel.setBorder(new TitledBorder("Ignored JSON keys (response compare)"));
+            jsonPanel.add(new JScrollPane(jsonKeysList), BorderLayout.CENTER);
+            JPanel jsonSouth = new JPanel(new FlowLayout(FlowLayout.LEFT));
+            jsonSouth.add(new JLabel("Key:")); jsonSouth.add(jsonKeyField);
+            jsonSouth.add(new JButton(new AbstractAction("Add") {
+                @Override public void actionPerformed(ActionEvent e) {
+                    String key = jsonKeyField.getText();
+                    if (key == null || key.trim().isEmpty()) return;
+                    var list = config.getIgnoredJsonKeys();
+                    String v = key.trim(); // case-sensitive
+                    if (!list.contains(v)) list.add(v);
+                    config.setIgnoredJsonKeys(list);
+                    config.save();
+                    reloadFiltering();
+                    jsonKeyField.setText("");
+                }
+            }));
+            jsonSouth.add(new JButton(new AbstractAction("Remove Selected") {
+                @Override public void actionPerformed(ActionEvent e) {
+                    var list = config.getIgnoredJsonKeys();
+                    for (String sel : jsonKeysList.getSelectedValuesList()) list.remove(sel);
+                    config.setIgnoredJsonKeys(list);
+                    config.save();
+                    reloadFiltering();
+                }
+            }));
+            jsonPanel.add(jsonSouth, BorderLayout.SOUTH);
+
             filterPanel.add(hdrPanel);
             filterPanel.add(Box.createVerticalStrut(8));
             filterPanel.add(extPanel);
             filterPanel.add(Box.createVerticalStrut(8));
             filterPanel.add(pathPanel);
+            filterPanel.add(Box.createVerticalStrut(8));
+            filterPanel.add(jsonPanel);
 
             // Performance panel
             JPanel perf = new JPanel(new FlowLayout(FlowLayout.LEFT));
@@ -343,6 +380,8 @@ public class AydaTab extends JPanel {
         skipExtModel.clear();
         for (String s : config.getSkipExtensions()) skipExtModel.addElement(s);
         pathExcludeArea.setText(String.join("\n", config.getPathExcludeRegex()));
+        jsonKeysModel.clear();
+        for (String s : config.getIgnoredJsonKeys()) jsonKeysModel.addElement(s);
     }
 
     private void onGroupSelected() {
