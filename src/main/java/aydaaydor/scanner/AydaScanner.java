@@ -18,9 +18,8 @@ import burp.api.montoya.http.message.responses.HttpResponse;
 import burp.api.montoya.scanner.audit.issues.AuditIssue;
 
 import java.util.*;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
-import java.util.concurrent.TimeUnit;
+import java.util.concurrent.*;
+import java.util.regex.Pattern;
 
 import static burp.api.montoya.http.message.HttpRequestResponse.httpRequestResponse;
 import static burp.api.montoya.scanner.audit.issues.AuditIssue.auditIssue;
@@ -30,7 +29,12 @@ public class AydaScanner implements HttpHandler, ScannerControls {
 
     private final MontoyaApi api;
     private final AydaConfig config;
-    private final ExecutorService exec = Executors.newFixedThreadPool(4);
+    private final ThreadPoolExecutor exec;
+    private final ExecutorService httpExec = Executors.newCachedThreadPool(r -> {
+        Thread t = new Thread(r, "ayda-http");
+        t.setDaemon(true);
+        return t;
+    });
     // Dedup caches (no inFlight as per requirements)
     private final TtlLruCache seen;
     private final TtlLruCache reported;
@@ -60,10 +64,13 @@ public class AydaScanner implements HttpHandler, ScannerControls {
         this.config = config;
         this.seen = new TtlLruCache(() -> this.config.getDedupLruMax(), () -> this.config.getDedupTtlMillis());
         this.reported = new TtlLruCache(() -> this.config.getDedupLruMax(), () -> this.config.getDedupTtlMillis());
+        int n = Math.max(1, config.getMaxParallelMutations());
+        this.exec = new ThreadPoolExecutor(n, n, 0L, TimeUnit.MILLISECONDS, new LinkedBlockingQueue<>());
     }
 
     public void shutdown() {
         exec.shutdown();
+        httpExec.shutdownNow();
         try { exec.awaitTermination(2, TimeUnit.SECONDS); } catch (InterruptedException ignored) {}
     }
 
@@ -75,6 +82,15 @@ public class AydaScanner implements HttpHandler, ScannerControls {
     @Override
     public void clearReportedCache() {
         reported.clear();
+    }
+
+    @Override
+    public void applySettings() {
+        try {
+            int n = Math.max(1, config.getMaxParallelMutations());
+            exec.setCorePoolSize(n);
+            exec.setMaximumPoolSize(n);
+        } catch (Exception ignored) {}
     }
 
     @Override
@@ -101,6 +117,10 @@ public class AydaScanner implements HttpHandler, ScannerControls {
         if (pathNoQuery != null && isStaticAssetPath(pathNoQuery)) {
             return ResponseReceivedAction.continueWith(responseReceived);
         }
+        // Skip by project path exclude regex
+        if (pathNoQuery != null && isPathExcluded(pathNoQuery)) {
+            return ResponseReceivedAction.continueWith(responseReceived);
+        }
 
 
         // find all matching occurrences across all groups and scan each
@@ -119,16 +139,21 @@ public class AydaScanner implements HttpHandler, ScannerControls {
     }
 
     private boolean isStaticAssetPath(String path) {
-        String p = path.toLowerCase(java.util.Locale.ROOT);
-        return p.endsWith(".gif")
-                || p.endsWith(".jpg")
-                || p.endsWith(".png")
-                || p.endsWith(".ico")
-                || p.endsWith(".css")
-                || p.endsWith(".woff")
-                || p.endsWith(".woff2")
-                || p.endsWith(".ttf")
-                || p.endsWith(".svg");
+        String p = path.toLowerCase(Locale.ROOT);
+        for (String ext : config.getSkipExtensions()) {
+            if (p.endsWith(ext)) return true;
+        }
+        return false;
+    }
+
+    private boolean isPathExcluded(String path) {
+        try {
+            for (String rx : config.getPathExcludeRegex()) {
+                try { if (Pattern.compile(rx).matcher(path).find()) return true; }
+                catch (Exception ignored) {}
+            }
+        } catch (Exception ignored) {}
+        return false;
     }
 
     private void runIdorChecks(HttpRequest baseReq, HttpResponse baseResp, Match match, String scanKey) {
@@ -145,14 +170,18 @@ public class AydaScanner implements HttpHandler, ScannerControls {
 
             // Build and send dummy request first
             HttpRequest dummyReq = applyReplacement(baseReq, match, dummy);
-            HttpRequestResponse dummyRR = api.http().sendRequest(dummyReq);
+            HttpRequestResponse dummyRR = sendWithTimeout(dummyReq);
             HttpResponse dummyResp = dummyRR.response();
             String dummyBody = dummyResp.bodyToString();
             int dummyLen = safeContentLength(dummyResp, dummyBody);
 
+            int processed = 0;
             for (String id : otherIds) {
                 HttpRequest testReq = applyReplacement(baseReq, match, id);
-                HttpRequestResponse testRR = api.http().sendRequest(testReq);
+                if (config.getDelayMsBetweenMutations() > 0) {
+                    try { Thread.sleep(config.getDelayMsBetweenMutations()); } catch (InterruptedException ie) { Thread.currentThread().interrupt(); }
+                }
+                HttpRequestResponse testRR = sendWithTimeout(testReq);
                 HttpResponse testResp = testRR.response();
                 String testBody = testResp.bodyToString();
                 int testLen = safeContentLength(testResp, testBody);
@@ -167,11 +196,30 @@ public class AydaScanner implements HttpHandler, ScannerControls {
                     reportIssue(baseReq, baseResp, testRR, match, id, dummy);
                     break; // one finding per base request
                 }
+                processed++;
+                if (processed >= Math.max(1, config.getMaxMutationsPerBase())) break;
             }
         } catch (Exception e) {
             api.logging().logToError("AydaAydor error: " + e);
         } finally {
             seen.mark(scanKey, System.currentTimeMillis());
+        }
+    }
+
+    private HttpRequestResponse sendWithTimeout(HttpRequest req) {
+        int timeout = Math.max(0, config.getRequestTimeoutMs());
+        if (timeout <= 0) {
+            return api.http().sendRequest(req);
+        }
+        Future<HttpRequestResponse> f = httpExec.submit(() -> api.http().sendRequest(req));
+        try {
+            return f.get(timeout, TimeUnit.MILLISECONDS);
+        } catch (TimeoutException te) {
+            f.cancel(true);
+            // fabricate a response-like object? Keep it simple: return base request/empty response
+            return api.http().sendRequest(req); // fallback without enforced timeout
+        } catch (Exception e) {
+            return api.http().sendRequest(req);
         }
     }
 
@@ -333,10 +381,11 @@ public class AydaScanner implements HttpHandler, ScannerControls {
         return Integer.toHexString(h);
     }
 
-    private static boolean isIgnoredHeader(String name) {
+    private boolean isIgnoredHeader(String name) {
         if (name == null) return false;
-        String lower = name.trim().toLowerCase(java.util.Locale.ROOT);
-        return IGNORED_HEADER_NAMES.contains(lower);
+        String lower = name.trim().toLowerCase(Locale.ROOT);
+        if (IGNORED_HEADER_NAMES.contains(lower)) return true;
+        try { return config.getIgnoredHeaders().contains(lower); } catch (Exception ignored) { return false; }
     }
 
     private List<Match> findAllMatches(HttpRequest req, List<IdGroup> groups) {

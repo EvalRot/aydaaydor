@@ -35,6 +35,23 @@ public class AydaTab extends JPanel {
     private final JComboBox<HttpParameterType> paramTypeBox = new JComboBox<>(HttpParameterType.values());
     private final JTextField paramNameField = new JTextField(16);
 
+    // Filtering UI
+    private final DefaultListModel<String> ignoredHeadersModel = new DefaultListModel<>();
+    private final JList<String> ignoredHeadersList = new JList<>(ignoredHeadersModel);
+    private final JTextField ignoredHeaderField = new JTextField(16);
+
+    private final DefaultListModel<String> skipExtModel = new DefaultListModel<>();
+    private final JList<String> skipExtList = new JList<>(skipExtModel);
+    private final JTextField skipExtField = new JTextField(10);
+
+    private final JTextArea pathExcludeArea = new JTextArea(5, 40);
+
+    // Performance UI
+    private final JTextField timeoutMsField = new JTextField(6);
+    private final JTextField delayMsField = new JTextField(6);
+    private final JTextField maxMutationsField = new JTextField(6);
+    private final JTextField maxParallelField = new JTextField(6);
+
     public AydaTab(AydaConfig config, Logging log, ScannerControls controls) {
         super(new BorderLayout());
         this.config = config;
@@ -164,15 +181,126 @@ public class AydaTab extends JPanel {
             }));
             ignoredPanel.add(ignoredSouth, BorderLayout.SOUTH);
 
+            // Filtering panels: headers, extensions, path regex
+            JPanel filterPanel = new JPanel();
+            filterPanel.setLayout(new BoxLayout(filterPanel, BoxLayout.Y_AXIS));
+
+            JPanel hdrPanel = new JPanel(new BorderLayout());
+            hdrPanel.setBorder(new TitledBorder("Ignored headers (case-insensitive)"));
+            hdrPanel.add(new JScrollPane(ignoredHeadersList), BorderLayout.CENTER);
+            JPanel hdrSouth = new JPanel(new FlowLayout(FlowLayout.LEFT));
+            hdrSouth.add(new JLabel("Header:"));
+            hdrSouth.add(ignoredHeaderField);
+            hdrSouth.add(new JButton(new AbstractAction("Add") {
+                @Override public void actionPerformed(ActionEvent e) {
+                    String n = ignoredHeaderField.getText();
+                    if (n == null || n.trim().isEmpty()) return;
+                    var list = config.getIgnoredHeaders();
+                    list.add(n.trim().toLowerCase());
+                    config.setIgnoredHeaders(list);
+                    config.save();
+                    reloadFiltering();
+                    ignoredHeaderField.setText("");
+                }
+            }));
+            hdrSouth.add(new JButton(new AbstractAction("Remove Selected") {
+                @Override public void actionPerformed(ActionEvent e) {
+                    var list = config.getIgnoredHeaders();
+                    for (String sel : ignoredHeadersList.getSelectedValuesList()) {
+                        list.remove(sel.toLowerCase());
+                    }
+                    config.setIgnoredHeaders(list);
+                    config.save();
+                    reloadFiltering();
+                }
+            }));
+            hdrPanel.add(hdrSouth, BorderLayout.SOUTH);
+
+            JPanel extPanel = new JPanel(new BorderLayout());
+            extPanel.setBorder(new TitledBorder("Skip extensions (e.g., .png)"));
+            extPanel.add(new JScrollPane(skipExtList), BorderLayout.CENTER);
+            JPanel extSouth = new JPanel(new FlowLayout(FlowLayout.LEFT));
+            extSouth.add(new JLabel("Extension:"));
+            extSouth.add(skipExtField);
+            extSouth.add(new JButton(new AbstractAction("Add") {
+                @Override public void actionPerformed(ActionEvent e) {
+                    String n = skipExtField.getText();
+                    if (n == null || n.trim().isEmpty()) return;
+                    var list = config.getSkipExtensions();
+                    String v = n.trim().toLowerCase();
+                    if (!v.startsWith(".")) v = "." + v;
+                    if (!list.contains(v)) list.add(v);
+                    config.setSkipExtensions(list);
+                    config.save();
+                    reloadFiltering();
+                    skipExtField.setText("");
+                }
+            }));
+            extSouth.add(new JButton(new AbstractAction("Remove Selected") {
+                @Override public void actionPerformed(ActionEvent e) {
+                    var list = config.getSkipExtensions();
+                    for (String sel : skipExtList.getSelectedValuesList()) list.remove(sel);
+                    config.setSkipExtensions(list);
+                    config.save();
+                    reloadFiltering();
+                }
+            }));
+            extPanel.add(extSouth, BorderLayout.SOUTH);
+
+            JPanel pathPanel = new JPanel(new BorderLayout());
+            pathPanel.setBorder(new TitledBorder("Path exclude regex (one per line)"));
+            pathPanel.add(new JScrollPane(pathExcludeArea), BorderLayout.CENTER);
+            JPanel pathSouth = new JPanel(new FlowLayout(FlowLayout.LEFT));
+            pathSouth.add(new JButton(new AbstractAction("Save Paths") {
+                @Override public void actionPerformed(ActionEvent e) {
+                    java.util.List<String> lines = Arrays.stream(pathExcludeArea.getText().split("\n")).map(String::trim).filter(s -> !s.isEmpty()).collect(toList());
+                    config.setPathExcludeRegex(lines);
+                    config.save();
+                }
+            }));
+            pathPanel.add(pathSouth, BorderLayout.SOUTH);
+
+            filterPanel.add(hdrPanel);
+            filterPanel.add(Box.createVerticalStrut(8));
+            filterPanel.add(extPanel);
+            filterPanel.add(Box.createVerticalStrut(8));
+            filterPanel.add(pathPanel);
+
+            // Performance panel
+            JPanel perf = new JPanel(new FlowLayout(FlowLayout.LEFT));
+            perf.setBorder(new TitledBorder("Performance"));
+            perf.add(new JLabel("Timeout ms:")); perf.add(timeoutMsField);
+            perf.add(new JLabel("Delay ms:")); perf.add(delayMsField);
+            perf.add(new JLabel("Max mutations/base:")); perf.add(maxMutationsField);
+            perf.add(new JLabel("Max parallel:")); perf.add(maxParallelField);
+            perf.add(new JButton(new AbstractAction("Save Perf") {
+                @Override public void actionPerformed(ActionEvent e) {
+                    try {
+                        config.setRequestTimeoutMs(Integer.parseInt(timeoutMsField.getText().trim()));
+                        config.setDelayMsBetweenMutations(Integer.parseInt(delayMsField.getText().trim()));
+                        config.setMaxMutationsPerBase(Integer.parseInt(maxMutationsField.getText().trim()));
+                        config.setMaxParallelMutations(Integer.parseInt(maxParallelField.getText().trim()));
+                        config.save();
+                        if (controls != null) controls.applySettings();
+                    } catch (Exception ex) {
+                        JOptionPane.showMessageDialog(AydaTab.this, "Invalid performance values: " + ex.getMessage());
+                    }
+                }
+            }));
+
             right.add(groupPanel);
             right.add(Box.createVerticalStrut(8));
             right.add(deniedPanel);
+            right.add(Box.createVerticalStrut(8));
+            right.add(filterPanel);
             right.add(Box.createVerticalStrut(8));
             right.add(ignoredPanel);
             right.add(Box.createVerticalStrut(8));
             right.add(enabledBox);
             right.add(Box.createVerticalStrut(8));
             right.add(dedupPanel);
+            right.add(Box.createVerticalStrut(8));
+            right.add(perf);
 
         add(left, BorderLayout.WEST);
         add(right, BorderLayout.CENTER);
@@ -188,6 +316,11 @@ public class AydaTab extends JPanel {
             ttlHoursField.setText(Long.toString(Math.max(1, config.getDedupTtlMillis() / (60 * 60 * 1000))));
             lruSizeField.setText(Integer.toString(config.getDedupLruMax()));
             reloadIgnoredParams();
+            reloadFiltering();
+            timeoutMsField.setText(Integer.toString(config.getRequestTimeoutMs()));
+            delayMsField.setText(Integer.toString(config.getDelayMsBetweenMutations()));
+            maxMutationsField.setText(Integer.toString(config.getMaxMutationsPerBase()));
+            maxParallelField.setText(Integer.toString(config.getMaxParallelMutations()));
         }
 
     private void reloadIgnoredParams() {
@@ -202,6 +335,14 @@ public class AydaTab extends JPanel {
         }
         java.util.Collections.sort(items);
         for (String s : items) ignoredModel.addElement(s);
+    }
+
+    private void reloadFiltering() {
+        ignoredHeadersModel.clear();
+        for (String s : config.getIgnoredHeaders()) ignoredHeadersModel.addElement(s);
+        skipExtModel.clear();
+        for (String s : config.getSkipExtensions()) skipExtModel.addElement(s);
+        pathExcludeArea.setText(String.join("\n", config.getPathExcludeRegex()));
     }
 
     private void onGroupSelected() {

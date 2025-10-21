@@ -8,6 +8,7 @@ repositories {
 
 dependencies {
     compileOnly("net.portswigger.burp.extensions:montoya-api:2025.8")
+    implementation("org.yaml:snakeyaml:2.2")
 }
 
 tasks.withType<JavaCompile> {
