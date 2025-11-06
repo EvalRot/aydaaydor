@@ -41,8 +41,10 @@ public class AydaConfig {
     private final List<String> ignoredHeaders = new ArrayList<>();
     private final List<String> skipExtensions = new ArrayList<>();
     private final List<String> ignoredJsonKeys = new ArrayList<>();
+    // Number of identical baseline repeats for dynamic element pruning
+    private volatile int baselineRepeatCount = 2;
     private volatile int requestTimeoutMs = 10000;
-    private volatile int delayMsBetweenMutations = 0;
+    private volatile int delayMsBetweenMutations = 500;
     private volatile int maxMutationsPerBase = 20;
     private volatile int maxParallelMutations = 4;
     private volatile boolean enabled = true;
@@ -81,6 +83,9 @@ public class AydaConfig {
     public synchronized List<String> getDeniedStrings() {
         return new ArrayList<>(deniedStrings);
     }
+
+    public int getBaselineRepeatCount() { return Math.max(0, baselineRepeatCount); }
+    public void setBaselineRepeatCount(int v) { this.baselineRepeatCount = Math.max(0, v); }
 
     // Ignored parameters management
     public synchronized void addIgnoredParam(HttpParameterType type, String name) {
@@ -249,6 +254,8 @@ public class AydaConfig {
             if (skipExtensions.isEmpty()) {
                 setSkipExtensions(Arrays.asList(".gif", ".jpg", ".png", ".ico", ".css", ".woff", ".woff2", ".ttf", ".svg"));
             }
+            // Baseline repeats: default 2 if not set via YAML
+            if (baselineRepeatCount < 0) baselineRepeatCount = 0;
         } catch (Exception e) {
             log.logToError("AydaAydor: Failed to load preferences: " + e);
         }
@@ -397,6 +404,9 @@ public class AydaConfig {
             Object par = root.get("max_parallel_mutations");
             if (par instanceof Number) setMaxParallelMutations(((Number) par).intValue());
 
+            Object repeats = root.get("baseline_repeat_count");
+            if (repeats instanceof Number) setBaselineRepeatCount(((Number) repeats).intValue());
+
             Object dm = root.get("dedup_mode");
             if (dm instanceof String) {
                 try { setDedupMode(DedupMode.valueOf(((String) dm).trim())); } catch (Exception ignoredEx) {}
@@ -444,6 +454,7 @@ public class AydaConfig {
         root.put("delay_ms_between_mutations", getDelayMsBetweenMutations());
         root.put("max_mutations_per_base", getMaxMutationsPerBase());
         root.put("max_parallel_mutations", getMaxParallelMutations());
+        root.put("baseline_repeat_count", getBaselineRepeatCount());
         root.put("dedup_mode", getDedupMode().name());
         root.put("dedup_ttl_ms", getDedupTtlMillis());
 

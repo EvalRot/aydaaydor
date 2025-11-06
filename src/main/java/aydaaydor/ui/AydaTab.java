@@ -1,7 +1,6 @@
 package aydaaydor.ui;
 
 import aydaaydor.config.AydaConfig;
-import aydaaydor.config.DedupMode;
 import aydaaydor.config.IdGroup;
 import aydaaydor.scanner.ScannerControls;
 import burp.api.montoya.http.message.params.HttpParameterType;
@@ -25,7 +24,7 @@ public class AydaTab extends JPanel {
     private final JLabel typeLabel = new JLabel("Type: ");
     private final JTextArea deniedArea = new JTextArea(6, 40);
     private final JCheckBox enabledBox = new JCheckBox("Enable scanning");
-    private final JComboBox<DedupMode> dedupModeBox = new JComboBox<>(DedupMode.values());
+    // Dedup mode combo removed; only TTL/LRU controls remain
     private final JTextField ttlHoursField = new JTextField(6);
     private final JTextField lruSizeField = new JTextField(6);
 
@@ -56,6 +55,7 @@ public class AydaTab extends JPanel {
     private final JTextField delayMsField = new JTextField(6);
     private final JTextField maxMutationsField = new JTextField(6);
     private final JTextField maxParallelField = new JTextField(6);
+    private final JTextField baselineRepeatsField = new JTextField(4);
 
     public AydaTab(AydaConfig config, Logging log, ScannerControls controls) {
         super(new BorderLayout());
@@ -100,7 +100,7 @@ public class AydaTab extends JPanel {
         groupPanel.add(grpSouth, BorderLayout.SOUTH);
 
         JPanel deniedPanel = new JPanel(new BorderLayout());
-        deniedPanel.setBorder(new TitledBorder("Denied strings (one per line, case-insensitive)"));
+        deniedPanel.setBorder(new TitledBorder("Denied Strings (The strings that signal an access control violation)"));
         deniedArea.setLineWrap(true);
         deniedArea.setWrapStyleWord(true);
         deniedPanel.add(new JScrollPane(deniedArea), BorderLayout.CENTER);
@@ -123,8 +123,6 @@ public class AydaTab extends JPanel {
             dedupPanel.setBorder(new TitledBorder("Deduplication"));
 
             JPanel row1 = new JPanel(new FlowLayout(FlowLayout.LEFT));
-            row1.add(new JLabel("Mode:"));
-            row1.add(dedupModeBox);
             row1.add(new JLabel("TTL (hours):"));
             row1.add(ttlHoursField);
             row1.add(new JLabel("LRU size:"));
@@ -192,6 +190,7 @@ public class AydaTab extends JPanel {
 
             JPanel hdrPanel = new JPanel(new BorderLayout());
             hdrPanel.setBorder(new TitledBorder("Ignored headers (case-insensitive)"));
+            hdrPanel.add(new JLabel("A list of headers in which group identifiers will not be searched."), BorderLayout.NORTH);
             hdrPanel.add(new JScrollPane(ignoredHeadersList), BorderLayout.CENTER);
             JPanel hdrSouth = new JPanel(new FlowLayout(FlowLayout.LEFT));
             hdrSouth.add(new JLabel("Header:"));
@@ -223,6 +222,7 @@ public class AydaTab extends JPanel {
 
             JPanel extPanel = new JPanel(new BorderLayout());
             extPanel.setBorder(new TitledBorder("Skip extensions (e.g., .png)"));
+            extPanel.add(new JLabel("Requests to files with the following extensions will not be scanned."), BorderLayout.NORTH);
             extPanel.add(new JScrollPane(skipExtList), BorderLayout.CENTER);
             JPanel extSouth = new JPanel(new FlowLayout(FlowLayout.LEFT));
             extSouth.add(new JLabel("Extension:"));
@@ -254,6 +254,7 @@ public class AydaTab extends JPanel {
 
             JPanel pathPanel = new JPanel(new BorderLayout());
             pathPanel.setBorder(new TitledBorder("Path exclude regex (one per line)"));
+            pathPanel.add(new JLabel("Requests with the following URL Paths will not be scanned."), BorderLayout.NORTH);
             pathPanel.add(new JScrollPane(pathExcludeArea), BorderLayout.CENTER);
             JPanel pathSouth = new JPanel(new FlowLayout(FlowLayout.LEFT));
             pathSouth.add(new JButton(new AbstractAction("Save Paths") {
@@ -267,7 +268,7 @@ public class AydaTab extends JPanel {
 
             // Ignored JSON keys panel
             JPanel jsonPanel = new JPanel(new BorderLayout());
-            jsonPanel.setBorder(new TitledBorder("Ignored JSON keys (response compare)"));
+            jsonPanel.setBorder(new TitledBorder("Dynamic JSON keys (the keys to avoid when building the comparision map)"));
             jsonPanel.add(new JScrollPane(jsonKeysList), BorderLayout.CENTER);
             JPanel jsonSouth = new JPanel(new FlowLayout(FlowLayout.LEFT));
             jsonSouth.add(new JLabel("Key:")); jsonSouth.add(jsonKeyField);
@@ -310,6 +311,7 @@ public class AydaTab extends JPanel {
             perf.add(new JLabel("Delay ms:")); perf.add(delayMsField);
             perf.add(new JLabel("Max mutations/base:")); perf.add(maxMutationsField);
             perf.add(new JLabel("Max parallel:")); perf.add(maxParallelField);
+            perf.add(new JLabel("Baseline repeats:")); perf.add(baselineRepeatsField);
             perf.add(new JButton(new AbstractAction("Save Perf") {
                 @Override public void actionPerformed(ActionEvent e) {
                     try {
@@ -317,6 +319,7 @@ public class AydaTab extends JPanel {
                         config.setDelayMsBetweenMutations(Integer.parseInt(delayMsField.getText().trim()));
                         config.setMaxMutationsPerBase(Integer.parseInt(maxMutationsField.getText().trim()));
                         config.setMaxParallelMutations(Integer.parseInt(maxParallelField.getText().trim()));
+                        config.setBaselineRepeatCount(Integer.parseInt(baselineRepeatsField.getText().trim()));
                         config.save();
                         if (controls != null) controls.applySettings();
                     } catch (Exception ex) {
@@ -327,11 +330,8 @@ public class AydaTab extends JPanel {
 
             right.add(groupPanel);
             right.add(Box.createVerticalStrut(8));
+            // Denied on main page
             right.add(deniedPanel);
-            right.add(Box.createVerticalStrut(8));
-            right.add(filterPanel);
-            right.add(Box.createVerticalStrut(8));
-            right.add(ignoredPanel);
             right.add(Box.createVerticalStrut(8));
             right.add(enabledBox);
             right.add(Box.createVerticalStrut(8));
@@ -339,8 +339,34 @@ public class AydaTab extends JPanel {
             right.add(Box.createVerticalStrut(8));
             right.add(perf);
 
-        add(left, BorderLayout.WEST);
-        add(right, BorderLayout.CENTER);
+        // Build tabs: Main + grouped settings tabs
+        JTabbedPane tabs = new JTabbedPane();
+        JPanel main = new JPanel(new BorderLayout());
+        main.add(left, BorderLayout.WEST);
+        main.add(right, BorderLayout.CENTER);
+        tabs.addTab("Main", main);
+        // Combined Ignored tab: Parameters + Headers + Dynamic JSON keys
+        JPanel ignoredTab = new JPanel();
+        ignoredTab.setLayout(new BoxLayout(ignoredTab, BoxLayout.Y_AXIS));
+        JPanel ignoredIntro = new JPanel(new BorderLayout());
+        ignoredIntro.add(new JLabel("If the group identifier appears in a parameter with a type and name from the list, the request will not be sent for IDOR scanning."), BorderLayout.NORTH);
+        ignoredIntro.add(ignoredPanel, BorderLayout.CENTER);
+        ignoredTab.add(ignoredIntro);
+        ignoredTab.add(Box.createVerticalStrut(8));
+        ignoredTab.add(hdrPanel);
+        ignoredTab.add(Box.createVerticalStrut(8));
+        ignoredTab.add(jsonPanel);
+        tabs.addTab("Ignored", ignoredTab);
+
+        // Combined Exclusions tab: Skip extensions + Path exclude regex
+        JPanel exclusionsTab = new JPanel();
+        exclusionsTab.setLayout(new BoxLayout(exclusionsTab, BoxLayout.Y_AXIS));
+        exclusionsTab.add(extPanel);
+        exclusionsTab.add(Box.createVerticalStrut(8));
+        exclusionsTab.add(pathPanel);
+        tabs.addTab("Exclusions", exclusionsTab);
+        setLayout(new BorderLayout());
+        add(tabs, BorderLayout.CENTER);
     }
 
     private void reloadFromConfig() {
@@ -348,16 +374,16 @@ public class AydaTab extends JPanel {
             for (IdGroup g : config.allGroups()) groupsModel.addElement(g.name);
             if (!groupsModel.isEmpty()) groupsList.setSelectedIndex(0);
             deniedArea.setText(String.join("\n", config.getDeniedStrings()));
-            // Dedup settings
-            dedupModeBox.setSelectedItem(config.getDedupMode());
+            // Dedup settings (mode removed)
             ttlHoursField.setText(Long.toString(Math.max(1, config.getDedupTtlMillis() / (60 * 60 * 1000))));
             lruSizeField.setText(Integer.toString(config.getDedupLruMax()));
             reloadIgnoredParams();
             reloadFiltering();
-            timeoutMsField.setText(Integer.toString(config.getRequestTimeoutMs()));
-            delayMsField.setText(Integer.toString(config.getDelayMsBetweenMutations()));
-            maxMutationsField.setText(Integer.toString(config.getMaxMutationsPerBase()));
-            maxParallelField.setText(Integer.toString(config.getMaxParallelMutations()));
+        timeoutMsField.setText(Integer.toString(config.getRequestTimeoutMs()));
+        delayMsField.setText(Integer.toString(config.getDelayMsBetweenMutations()));
+        maxMutationsField.setText(Integer.toString(config.getMaxMutationsPerBase()));
+        maxParallelField.setText(Integer.toString(config.getMaxParallelMutations()));
+        baselineRepeatsField.setText(Integer.toString(config.getBaselineRepeatCount()));
         }
 
     private void reloadIgnoredParams() {
@@ -435,10 +461,8 @@ public class AydaTab extends JPanel {
 
     private void saveDedupSettings() {
         try {
-            DedupMode mode = (DedupMode) dedupModeBox.getSelectedItem();
             long hours = Long.parseLong(ttlHoursField.getText().trim());
             int lru = Integer.parseInt(lruSizeField.getText().trim());
-            config.setDedupMode(mode);
             config.setDedupTtlMillis(Math.max(0, hours) * 60L * 60L * 1000L);
             config.setDedupLruMax(lru);
             config.save();

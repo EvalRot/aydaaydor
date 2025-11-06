@@ -133,7 +133,11 @@ public class AydaScanner implements HttpHandler, ScannerControls {
                 // recently scanned; skip
                 continue;
             }
-            exec.submit(() -> runIdorChecks(baseReq, baseResp, m, scanKey));
+            try {
+                api.logging().logToOutput("AydaAydor DEBUG: processing URL=" + baseReq.url()
+                        + " matchedId='" + m.matchedId + "' location=" + m.locationDescription());
+            } catch (Throwable ignored) {}
+            exec.submit(() -> processMatchNewAlgorithm(baseReq, baseResp, m, scanKey));
         }
 
         return ResponseReceivedAction.continueWith(responseReceived);
@@ -157,46 +161,89 @@ public class AydaScanner implements HttpHandler, ScannerControls {
         return false;
     }
 
-    private void runIdorChecks(HttpRequest baseReq, HttpResponse baseResp, Match match, String scanKey) {
+    private void processMatchNewAlgorithm(HttpRequest baseReq, HttpResponse baseResp, Match match, String scanKey) {
         try {
-            String baseBody = baseResp.bodyToString();
-            String baseHash = stableBodyHash(baseBody == null ? "" : baseBody);
-            int baseLen = safeContentLength(baseResp, baseBody);
-            // Build requests for each alternate id + dummy
-            List<String> denied = config.getDeniedStrings().stream().map(String::toLowerCase).collect(toList());
+            Map<String,String> baseline = ResponseExtractors.extractSignificant(baseResp, baseResp.bodyToString(), config.getIgnoredJsonKeys());
+            try {
+                api.logging().logToOutput("AydaAydor DEBUG: baseline significant map (size=" + baseline.size() + ") " + baseline);
+            } catch (Throwable ignored) {}
+            int repeats = Math.max(0, config.getBaselineRepeatCount());
+            List<Map<String,String>> repeatMaps = new ArrayList<>();
+            for (int i = 0; i < repeats; i++) {
+                if (config.getDelayMsBetweenMutations() > 0) {
+                    try { Thread.sleep(config.getDelayMsBetweenMutations()); } catch (InterruptedException ie) { Thread.currentThread().interrupt(); }
+                }
+                HttpRequestResponse rr = sendWithTimeout(baseReq);
+                HttpResponse rresp = rr.response();
+                if (rresp != null) {
+                    repeatMaps.add(ResponseExtractors.extractSignificant(rresp, rresp.bodyToString(), config.getIgnoredJsonKeys()));
+                }
+            }
+            Map<String,String> stableBaseline = retainStableKeys(baseline, repeatMaps);
+            try {
+                java.util.Set<String> removed = new java.util.LinkedHashSet<>(baseline.keySet());
+                removed.removeAll(stableBaseline.keySet());
+                api.logging().logToOutput("AydaAydor DEBUG: removed dynamic keys (count=" + removed.size() + "): " + removed);
+            } catch (Throwable ignored) {}
+            if (stableBaseline.isEmpty()) {
+                return;
+            }
 
             IdGroup group = match.group;
-            List<String> otherIds = group.ids.stream().filter(id -> !id.equals(match.matchedId)).collect(toList());
-            String dummy = group.generateDummyLike(match.matchedId);
-
-            // Build and send dummy request first
-            HttpRequest dummyReq = applyReplacement(baseReq, match, dummy);
-            HttpRequestResponse dummyRR = sendWithTimeout(dummyReq);
-            HttpResponse dummyResp = dummyRR.response();
-            String dummyBody = dummyResp.bodyToString();
-            int dummyLen = safeContentLength(dummyResp, dummyBody);
+            Map<String, Map<String,String>> originalsById = findOriginalValuesForOtherIds(baseReq, match, stableBaseline.keySet());
 
             int processed = 0;
-            for (String id : otherIds) {
+            for (String id : group.ids) {
+                if (id.equals(match.matchedId)) continue;
                 HttpRequest testReq = applyReplacement(baseReq, match, id);
                 if (config.getDelayMsBetweenMutations() > 0) {
                     try { Thread.sleep(config.getDelayMsBetweenMutations()); } catch (InterruptedException ie) { Thread.currentThread().interrupt(); }
                 }
                 HttpRequestResponse testRR = sendWithTimeout(testReq);
+                if (testRR == null || testRR.response() == null) continue;
                 HttpResponse testResp = testRR.response();
-                String testBody = testResp.bodyToString();
-                int testLen = safeContentLength(testResp, testBody);
+                Map<String,String> testMap = ResponseExtractors.extractSignificant(testResp, testResp.bodyToString(), config.getIgnoredJsonKeys());
 
-                boolean differentFromBase = responsesDifferent(baseResp, baseBody, testResp, testBody);
-                boolean differentFromDummy = responsesDifferent(dummyResp, dummyBody, testResp, testBody);
-                boolean containsDenied = containsAnyIgnoreCase(testBody, denied);
-                boolean extraCriterion = (testLen == baseLen) && (testLen != dummyLen)
-                        && (!Objects.equals(stableBodyHash(testBody == null ? "" : testBody), baseHash));
-
-                if (((differentFromBase && differentFromDummy) || extraCriterion) && !containsDenied) {
-                    reportIssue(baseReq, baseResp, testRR, match, id, dummy);
-                    break; // one finding per base request
+                // 7.1 unique original values found
+                Map<String,String> orig = originalsById.getOrDefault(id, Collections.emptyMap());
+                List<String> uniqueHits = new ArrayList<>();
+                for (Map.Entry<String,String> e : stableBaseline.entrySet()) {
+                    String k = e.getKey();
+                    String baseVal = e.getValue();
+                    String testVal = testMap.get(k);
+                    String origVal = orig.get(k);
+                    if (testVal != null && origVal != null && !Objects.equals(baseVal, testVal) && Objects.equals(testVal, origVal)) {
+                        uniqueHits.add(k + " => '" + testVal + "'");
+                    }
                 }
+                if (!uniqueHits.isEmpty()) {
+                    String detail = "[unique original values found]\n" +
+                            "Location: " + match.locationDescription() + "\n" +
+                            "ID group: " + group.name + " -> tested ID='" + id + "'\n" +
+                            "Keys matched original values (key => value):\n" + String.join("\n", uniqueHits);
+                    reportIssueNew(baseReq, baseResp, testRR, match, detail);
+                }
+
+                // 7.2 per-key Jaccard similarity
+                List<String> lowSim = new ArrayList<>();
+                for (Map.Entry<String,String> e : stableBaseline.entrySet()) {
+                    String k = e.getKey();
+                    String baseVal = e.getValue();
+                    String testVal = testMap.get(k);
+                    if (testVal == null) continue;
+                    double sim = jaccardSimilarity(baseVal, testVal);
+                    if (sim < 0.8) {
+                        lowSim.add(k + " => base='" + baseVal + "' vs test='" + testVal + "' (sim=" + String.format(Locale.ROOT, "%.2f", sim) + ")");
+                    }
+                }
+                if (!lowSim.isEmpty()) {
+                    String detail = "[jaccard similarity]\n" +
+                            "Location: " + match.locationDescription() + "\n" +
+                            "ID group: " + group.name + " -> tested ID='" + id + "'\n" +
+                            "Keys with similarity < 0.8:\n" + String.join("\n", lowSim);
+                    reportIssueNew(baseReq, baseResp, testRR, match, detail);
+                }
+
                 processed++;
                 if (processed >= Math.max(1, config.getMaxMutationsPerBase())) break;
             }
@@ -205,6 +252,140 @@ public class AydaScanner implements HttpHandler, ScannerControls {
         } finally {
             seen.mark(scanKey, System.currentTimeMillis());
         }
+    }
+
+    private Map<String,String> retainStableKeys(Map<String,String> baseline, List<Map<String,String>> repeats) {
+        if (baseline == null || baseline.isEmpty()) return Collections.emptyMap();
+        if (repeats == null || repeats.isEmpty()) return new LinkedHashMap<>(baseline);
+        Map<String,String> out = new LinkedHashMap<>();
+        outer: for (Map.Entry<String,String> e : baseline.entrySet()) {
+            String k = e.getKey(); String v = e.getValue();
+            for (Map<String,String> m : repeats) {
+                String vv = m.get(k);
+                if (!Objects.equals(v, vv)) continue outer;
+            }
+            out.put(k, v);
+        }
+        return out;
+    }
+
+    private Map<String, Map<String,String>> findOriginalValuesForOtherIds(HttpRequest baseReq, Match match, java.util.Set<String> keysOfInterest) {
+        Map<String, Map<String,String>> out = new LinkedHashMap<>();
+        IdGroup group = match.group;
+        List<String> others = group.ids.stream().filter(id -> !id.equals(match.matchedId)).collect(toList());
+        Map<String, HttpRequest> expectedReqs = new LinkedHashMap<>();
+        for (String id : others) expectedReqs.put(id, applyReplacement(baseReq, match, id));
+        for (Map.Entry<String, HttpRequest> en : expectedReqs.entrySet()) {
+            String id = en.getKey();
+            HttpRequest templ = en.getValue();
+            // Filter proxy history by method and URL path to reduce scanning space
+            java.util.List<burp.api.montoya.proxy.ProxyHttpRequestResponse> filtered = api.proxy().history(rr -> {
+                try {
+                    var r = rr.request();
+                    if (r == null) return false;
+                    if (!r.method().equalsIgnoreCase(templ.method())) return false;
+                    return safe(r.pathWithoutQuery()).equals(safe(templ.pathWithoutQuery()));
+                } catch (Throwable t) { return false; }
+            });
+            for (int idx = filtered.size() - 1; idx >= 0; idx--) { // newest first
+                var rr = filtered.get(idx);
+                var req = rr.request();
+                if (!paramCountsEqual(req, templ)) continue;
+                if (!idPresentSameLocation(req, id, match)) continue;
+                if (rr.response() == null) continue;
+                var map = ResponseExtractors.extractSignificant(rr.response(), rr.response().bodyToString(), config.getIgnoredJsonKeys());
+                Map<String,String> onlyKeys = new LinkedHashMap<>();
+                for (String k : keysOfInterest) {
+                    String v = map.get(k);
+                    if (v != null) onlyKeys.put(k, v);
+                }
+                if (!onlyKeys.isEmpty() && !out.containsKey(id)) {
+                    out.put(id, onlyKeys);
+                    try {
+                        api.logging().logToOutput("AydaAydor DEBUG: found original via Proxy.filter (id='" + id + "', filteredIndex=" + idx + ", url=" + req.url() + ")");
+                    } catch (Throwable ignored) {}
+                }
+            }
+        }
+        return out;
+    }
+
+    private boolean paramCountsEqual(HttpRequest a, HttpRequest b) {
+        try {
+            int aUrl = a.parameters(burp.api.montoya.http.message.params.HttpParameterType.URL).size();
+            int bUrl = b.parameters(burp.api.montoya.http.message.params.HttpParameterType.URL).size();
+            if (aUrl != bUrl) return false;
+            int aBody = a.parameters(burp.api.montoya.http.message.params.HttpParameterType.BODY).size();
+            int bBody = b.parameters(burp.api.montoya.http.message.params.HttpParameterType.BODY).size();
+            int aMp = a.parameters(burp.api.montoya.http.message.params.HttpParameterType.MULTIPART_ATTRIBUTE).size();
+            int bMp = b.parameters(burp.api.montoya.http.message.params.HttpParameterType.MULTIPART_ATTRIBUTE).size();
+            return (aBody + aMp) == (bBody + bMp);
+        } catch (Throwable t) { return false; }
+    }
+
+    private boolean idPresentSameLocation(HttpRequest req, String id, Match match) {
+        try {
+            switch (match.candidate.type) {
+                case PARAMETER: {
+                    var p = match.candidate.param;
+                    for (var rp : req.parameters()) {
+                        if (rp.type() == p.type() && rp.name().equals(p.name())) {
+                            String dec = match.chain.decodeAll(rp.value());
+                            return dec.contains(id);
+                        }
+                    }
+                    return false;
+                }
+                case HEADER: {
+                    String val = req.headerValue(match.candidate.headerName);
+                    if (val == null) return false;
+                    String dec = match.chain.decodeAll(val);
+                    return dec.contains(id);
+                }
+                case PATH_SEGMENT: {
+                    String path = req.pathWithoutQuery();
+                    if (path == null) return false;
+                    String[] parts = path.split("/");
+                    int idx = match.candidate.pathIndex;
+                    if (idx < 0 || idx >= parts.length) return false;
+                    String seg = parts[idx];
+                    String dec = match.chain.decodeAll(seg);
+                    return dec.contains(id);
+                }
+                case RAW_QUERY: {
+                    String full = req.path();
+                    int q = full.indexOf('?');
+                    String query = q >= 0 && q + 1 < full.length() ? full.substring(q + 1) : "";
+                    String dec = match.chain.decodeAll(query);
+                    return dec.contains(id);
+                }
+                default:
+                    return false;
+            }
+        } catch (Throwable t) { return false; }
+    }
+
+    private double jaccardSimilarity(String a, String b) {
+        if (a == null && b == null) return 1.0;
+        if (a == null || b == null) return 0.0;
+        java.util.Set<String> sa = tokenize(a);
+        java.util.Set<String> sb = tokenize(b);
+        if (sa.isEmpty() && sb.isEmpty()) return 1.0;
+        java.util.Set<String> inter = new java.util.HashSet<>(sa);
+        inter.retainAll(sb);
+        java.util.Set<String> union = new java.util.HashSet<>(sa);
+        union.addAll(sb);
+        return inter.size() / (double) Math.max(1, union.size());
+    }
+
+    private java.util.Set<String> tokenize(String s) {
+        java.util.Set<String> out = new java.util.LinkedHashSet<>();
+        if (s == null) return out;
+        for (String t : s.split("[^A-Za-z0-9]+")) {
+            String n = t.trim().toLowerCase(Locale.ROOT);
+            if (!n.isEmpty()) out.add(n);
+        }
+        return out;
     }
 
     private HttpRequestResponse sendWithTimeout(HttpRequest req) {
@@ -303,10 +484,8 @@ public class AydaScanner implements HttpHandler, ScannerControls {
         return false;
     }
 
-    private void reportIssue(HttpRequest baseReq, HttpResponse baseResp, HttpRequestResponse evidence, Match match, String toId, String dummy) {
+    private void reportIssueNew(HttpRequest baseReq, HttpResponse baseResp, HttpRequestResponse evidence, Match match, String detail) {
         String name = "Potential IDOR (AydaAydor)";
-        String detail = "Base ID '" + match.matchedId + "' in " + match.locationDescription() +
-                " replaced with '" + toId + "' produced different response, also different from dummy '" + dummy + "'.";
         String remediation = "Enforce object-level authorization checks. Tie access to user/session, not identifiers.";
         String reportKey = computeReportKey(baseReq, match);
         if (reported.isFresh(reportKey, System.currentTimeMillis())) {
@@ -341,10 +520,6 @@ public class AydaScanner implements HttpHandler, ScannerControls {
         StringBuilder sb = new StringBuilder();
         sb.append(method).append('|').append(host).append('|').append(path).append('|')
           .append(loc).append('|').append(chain).append('|').append(groupSig);
-        if (config.getDedupMode() == DedupMode.CONTENT_AWARE) {
-            String baseSig = baseSignature(baseResp);
-            sb.append('|').append(baseSig);
-        }
         return sb.toString();
     }
 
@@ -368,16 +543,6 @@ public class AydaScanner implements HttpHandler, ScannerControls {
                 return "Q";
             default:
                 return "?";
-        }
-    }
-
-    private String baseSignature(HttpResponse resp) {
-        try {
-            int code = resp.statusCode();
-            String body = resp.bodyToString();
-            return code + ":" + fastHash(body == null ? "" : body);
-        } catch (Exception e) {
-            return "0:";
         }
     }
 

@@ -10,6 +10,7 @@ dependencies {
     compileOnly("net.portswigger.burp.extensions:montoya-api:2025.8")
     implementation("org.yaml:snakeyaml:2.2")
     implementation("com.google.code.gson:gson:2.11.0")
+    implementation("org.jsoup:jsoup:1.17.2")
 }
 
 tasks.withType<JavaCompile> {
