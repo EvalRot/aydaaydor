@@ -8,85 +8,96 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 class EncodingChain {
-    enum Step { PLAIN, URL, UNICODE, BASE64, BASE64URL }
+    enum Step {
+        PLAIN, URL, UNICODE, BASE64, BASE64URL
+    }
+
     final List<Step> steps; // steps applied during decoding (in order)
 
-    EncodingChain(List<Step> steps) { this.steps = steps; }
+    EncodingChain(List<Step> steps) {
+        this.steps = steps;
+    }
+
+    private static final List<EncodingChain> SUPPORTED_CHAINS = List.of(
+            chain(Step.PLAIN),
+            chain(Step.URL),
+            chain(Step.UNICODE),
+            chain(Step.BASE64),
+            chain(Step.BASE64URL),
+            chain(Step.URL, Step.BASE64),
+            chain(Step.URL, Step.BASE64URL),
+            chain(Step.BASE64, Step.URL),
+            chain(Step.BASE64URL, Step.URL),
+            chain(Step.UNICODE, Step.URL));
+
+    private static EncodingChain chain(Step... steps) {
+        return new EncodingChain(List.of(steps));
+    }
 
     static Optional<EncodingChain> detect(String candidate, String wanted) {
-        if (candidate == null) return Optional.empty();
-        if (wanted == null) return Optional.empty();
+        if (candidate == null)
+            return Optional.empty();
+        if (wanted == null)
+            return Optional.empty();
         // Direct
-        if (candidate.equals(wanted)) return Optional.of(new EncodingChain(List.of(Step.PLAIN)));
+        if (candidate.equals(wanted))
+            return Optional.of(new EncodingChain(List.of(Step.PLAIN)));
 
         // Single-step decodes
-        if (decUrl(candidate).equals(wanted)) return Optional.of(new EncodingChain(List.of(Step.URL)));
-        if (decUnicode(candidate).equals(wanted)) return Optional.of(new EncodingChain(List.of(Step.UNICODE)));
-        if (decB64(candidate).map(s -> s.equals(wanted)).orElse(false)) return Optional.of(new EncodingChain(List.of(Step.BASE64)));
-        if (decB64Url(candidate).map(s -> s.equals(wanted)).orElse(false)) return Optional.of(new EncodingChain(List.of(Step.BASE64URL)));
+        if (decUrl(candidate).equals(wanted))
+            return Optional.of(new EncodingChain(List.of(Step.URL)));
+        if (decUnicode(candidate).equals(wanted))
+            return Optional.of(new EncodingChain(List.of(Step.UNICODE)));
+        if (decB64(candidate).map(s -> s.equals(wanted)).orElse(false))
+            return Optional.of(new EncodingChain(List.of(Step.BASE64)));
+        if (decB64Url(candidate).map(s -> s.equals(wanted)).orElse(false))
+            return Optional.of(new EncodingChain(List.of(Step.BASE64URL)));
 
         // Two-step: URL -> B64
         String u = decUrl(candidate);
-        if (decB64(u).map(s -> s.equals(wanted)).orElse(false)) return Optional.of(new EncodingChain(List.of(Step.URL, Step.BASE64)));
-        if (decB64Url(u).map(s -> s.equals(wanted)).orElse(false)) return Optional.of(new EncodingChain(List.of(Step.URL, Step.BASE64URL)));
+        if (decB64(u).map(s -> s.equals(wanted)).orElse(false))
+            return Optional.of(new EncodingChain(List.of(Step.URL, Step.BASE64)));
+        if (decB64Url(u).map(s -> s.equals(wanted)).orElse(false))
+            return Optional.of(new EncodingChain(List.of(Step.URL, Step.BASE64URL)));
 
         // Two-step: B64 -> URL
         Optional<String> b = decB64(candidate);
-        if (b.map(EncodingChain::decUrl).map(s -> s.equals(wanted)).orElse(false)) return Optional.of(new EncodingChain(List.of(Step.BASE64, Step.URL)));
+        if (b.map(EncodingChain::decUrl).map(s -> s.equals(wanted)).orElse(false))
+            return Optional.of(new EncodingChain(List.of(Step.BASE64, Step.URL)));
         Optional<String> bu = decB64Url(candidate);
-        if (bu.map(EncodingChain::decUrl).map(s -> s.equals(wanted)).orElse(false)) return Optional.of(new EncodingChain(List.of(Step.BASE64URL, Step.URL)));
+        if (bu.map(EncodingChain::decUrl).map(s -> s.equals(wanted)).orElse(false))
+            return Optional.of(new EncodingChain(List.of(Step.BASE64URL, Step.URL)));
 
         // Unicode then URL
         String un = decUnicode(candidate);
-        if (decUrl(un).equals(wanted)) return Optional.of(new EncodingChain(List.of(Step.UNICODE, Step.URL)));
+        if (decUrl(un).equals(wanted))
+            return Optional.of(new EncodingChain(List.of(Step.UNICODE, Step.URL)));
 
         return Optional.empty();
     }
 
-    // New: find an occurrence of 'wanted' (after applying encoding) inside candidate string.
+    // New: find an occurrence of 'wanted' (after applying encoding) inside
+    // candidate string.
     static Optional<EncodedOccurrence> findOccurrence(String candidate, String wanted) {
-        if (candidate == null || wanted == null) return Optional.empty();
+        if (candidate == null || wanted == null)
+            return Optional.empty();
 
-        // Define decode-step chains we support (same semantics as before)
-        List<List<Step>> chains = List.of(
-                List.of(Step.PLAIN),
-                List.of(Step.URL),
-                List.of(Step.UNICODE),
-                List.of(Step.BASE64),
-                List.of(Step.BASE64URL),
-                List.of(Step.URL, Step.BASE64),
-                List.of(Step.URL, Step.BASE64URL),
-                List.of(Step.BASE64, Step.URL),
-                List.of(Step.BASE64URL, Step.URL),
-                List.of(Step.UNICODE, Step.URL)
-        );
+        for (EncodingChain chain : SUPPORTED_CHAINS) {
 
-        for (List<Step> steps : chains) {
-            EncodingChain chain = new EncodingChain(steps);
-
-            // Styles for ambiguous encodings
-            List<String> samples = new ArrayList<>();
-            samples.add(null); // default
-            if (steps.contains(Step.UNICODE)) {
-                samples.add("%u0000"); // force %u style
-            }
-            if (steps.contains(Step.BASE64URL)) {
-                samples.add("="); // prefer padded style if applicable
+            // First searching strategy "Encode wanted and search": the method uses reversed
+            // decode-step chains to perform encoding of the search (wanted) value and look
+            // for it inside the candidate value. Is used when only a specific part of a
+            // candidate value is encoded e.g. Base64URL segment inside a JWT
+            String enc = chain.encode(wanted, candidate);
+            int idx = candidate.indexOf(enc);
+            if (idx >= 0) {
+                return Optional.of(new EncodedOccurrence(chain, enc, idx));
             }
 
-            for (String sample : samples) {
-                // First searching strategy: the method uses reversed decode-step chains to perform encoding
-                // of the search (wanted) value and the look for it inside the candidate value. Is used when only  
-                // a specific part of a candidate value is encoded e.g. Base64URL segment inside a JWT-like
-                String enc = chain.encode(wanted, sample);
-                int idx = candidate.indexOf(enc);
-                if (idx >= 0) {
-                    return Optional.of(new EncodedOccurrence(chain, enc, idx));
-                }
-            }
-
-            // Second searching strategy: decode the whole candidate and then search for a target (wanted) value
-            // inside it. Is used when entire candidate value is base64-encoded JSON for example
+            // Second searching strategy: decode the whole candidate and then search for a
+            // target (wanted) value
+            // inside it. Is used when entire candidate value is base64-encoded JSON for
+            // example
             String decoded = chain.decodeAll(candidate);
             if (decoded != null) {
                 int dIdx = decoded.indexOf(wanted);
@@ -114,13 +125,15 @@ class EncodingChain {
                         break;
                     case BASE64: {
                         var r = decB64(out);
-                        if (r.isEmpty()) return null;
+                        if (r.isEmpty())
+                            return null;
                         out = r.get();
                         break;
                     }
                     case BASE64URL: {
                         var r = decB64Url(out);
-                        if (r.isEmpty()) return null;
+                        if (r.isEmpty())
+                            return null;
                         out = r.get();
                         break;
                     }
@@ -133,30 +146,48 @@ class EncodingChain {
     }
 
     String encode(String value, String sampleEncodedForm) {
-        // The method uses reversed chains of encoding steps to perform encoding of the search value
-        // and the look for it inside the candidate. Is used when only a specific part of a candidate value is encoded
-        // e.g. Base64URL segment inside a JWT-like
+        // The method uses reversed chains of encoding steps to perform encoding of the
+        // search value
+        // and look for it inside the candidate. Is used when only a specific part
+        // of a candidate value is encoded e.g. Base64URL segment inside a JWT-like
         List<Step> inv = new ArrayList<>(steps);
         Collections.reverse(inv);
         String out = value;
         for (Step s : inv) {
             switch (s) {
-                case PLAIN: break;
-                case URL: out = encUrl(out); break;
-                case UNICODE: out = encUnicode(out, sampleEncodedForm); break;
-                case BASE64: out = encB64(out); break;
-                case BASE64URL: out = encB64Url(out, sampleEncodedForm); break;
+                case PLAIN:
+                    break;
+                case URL:
+                    out = encUrl(out);
+                    break;
+                case UNICODE:
+                    out = encUnicode(out, sampleEncodedForm);
+                    break;
+                case BASE64:
+                    out = encB64(out);
+                    break;
+                case BASE64URL:
+                    out = encB64Url(out, sampleEncodedForm);
+                    break;
             }
         }
         return out;
     }
 
     static String decUrl(String s) {
-        try { return URLDecoder.decode(s, StandardCharsets.UTF_8); } catch (Exception e) { return s; }
+        try {
+            return URLDecoder.decode(s, StandardCharsets.UTF_8);
+        } catch (Exception e) {
+            return s;
+        }
     }
 
     static String encUrl(String s) {
-        try { return URLEncoder.encode(s, StandardCharsets.UTF_8); } catch (Exception e) { return s; }
+        try {
+            return URLEncoder.encode(s, StandardCharsets.UTF_8);
+        } catch (Exception e) {
+            return s;
+        }
     }
 
     static String decUnicode(String s) {
@@ -172,7 +203,8 @@ class EncodingChain {
         }
         m1.appendTail(sb1);
         out = sb1.toString();
-        // unicode-escape style sequences: backslash-uXXXX (avoid literal sequence in source)
+        // unicode-escape style sequences: backslash-uXXXX (avoid literal sequence in
+        // source)
         Pattern p2 = Pattern.compile("\\\\" + "u([0-9A-Fa-f]{4})");
         Matcher m2 = p2.matcher(out);
         StringBuffer sb2 = new StringBuffer();
@@ -190,8 +222,10 @@ class EncodingChain {
         StringBuilder sb = new StringBuilder();
         for (char c : s.toCharArray()) {
             String hex = String.format("%04X", (int) c);
-            if (usePercentU) sb.append("%u").append(hex);
-            else sb.append("\\u").append(hex);
+            if (usePercentU)
+                sb.append("%u").append(hex);
+            else
+                sb.append("\\u").append(hex);
         }
         return sb.toString();
     }
@@ -201,20 +235,26 @@ class EncodingChain {
             // add padding if missing
             String x = s;
             int mod = x.length() % 4;
-            if (mod != 0) x = x + "====".substring(mod);
+            if (mod != 0)
+                x = x + "====".substring(mod);
             byte[] bytes = Base64.getDecoder().decode(x);
             return Optional.of(new String(bytes, StandardCharsets.UTF_8));
-        } catch (Exception e) { return Optional.empty(); }
+        } catch (Exception e) {
+            return Optional.empty();
+        }
     }
 
     static Optional<String> decB64Url(String s) {
         try {
             String x = s.replace('-', '+').replace('_', '/');
             int mod = x.length() % 4;
-            if (mod != 0) x = x + "====".substring(mod);
+            if (mod != 0)
+                x = x + "====".substring(mod);
             byte[] bytes = Base64.getUrlDecoder().decode(x);
             return Optional.of(new String(bytes, StandardCharsets.UTF_8));
-        } catch (Exception e) { return Optional.empty(); }
+        } catch (Exception e) {
+            return Optional.empty();
+        }
     }
 
     static String encB64(String s) {

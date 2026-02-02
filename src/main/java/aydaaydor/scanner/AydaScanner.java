@@ -57,8 +57,7 @@ public class AydaScanner implements HttpHandler, ScannerControls {
             "sec-fetch-dest",
             "referer",
             "accept-encoding",
-            "priority"
-    ));
+            "priority"));
 
     public AydaScanner(MontoyaApi api, AydaConfig config) {
         this.api = api;
@@ -72,7 +71,10 @@ public class AydaScanner implements HttpHandler, ScannerControls {
     public void shutdown() {
         exec.shutdown();
         httpExec.shutdownNow();
-        try { exec.awaitTermination(2, TimeUnit.SECONDS); } catch (InterruptedException ignored) {}
+        try {
+            exec.awaitTermination(2, TimeUnit.SECONDS);
+        } catch (InterruptedException ignored) {
+        }
     }
 
     @Override
@@ -91,7 +93,8 @@ public class AydaScanner implements HttpHandler, ScannerControls {
             int n = Math.max(1, config.getMaxParallelMutations());
             exec.setCorePoolSize(n);
             exec.setMaximumPoolSize(n);
-        } catch (Exception ignored) {}
+        } catch (Exception ignored) {
+        }
     }
 
     @Override
@@ -101,7 +104,8 @@ public class AydaScanner implements HttpHandler, ScannerControls {
 
     @Override
     public ResponseReceivedAction handleHttpResponseReceived(HttpResponseReceived responseReceived) {
-        if (!config.isEnabled()) return ResponseReceivedAction.continueWith(responseReceived);
+        if (!config.isEnabled())
+            return ResponseReceivedAction.continueWith(responseReceived);
         if (!responseReceived.toolSource().isFromTool(ToolType.PROXY, ToolType.REPEATER)) {
             return ResponseReceivedAction.continueWith(responseReceived);
         }
@@ -123,7 +127,6 @@ public class AydaScanner implements HttpHandler, ScannerControls {
             return ResponseReceivedAction.continueWith(responseReceived);
         }
 
-
         // find all matching occurrences across all groups and scan each
         List<Match> matches = findAllMatches(baseReq, config.allGroups());
         long now = System.currentTimeMillis();
@@ -136,7 +139,8 @@ public class AydaScanner implements HttpHandler, ScannerControls {
             try {
                 api.logging().logToOutput("AydaAydor DEBUG: processing URL=" + baseReq.url()
                         + " matchedId='" + m.matchedId + "' location=" + m.locationDescription());
-            } catch (Throwable ignored) {}
+            } catch (Throwable ignored) {
+            }
             exec.submit(() -> processMatchNewAlgorithm(baseReq, baseResp, m, scanKey));
         }
 
@@ -146,7 +150,8 @@ public class AydaScanner implements HttpHandler, ScannerControls {
     private boolean isStaticAssetPath(String path) {
         String p = path.toLowerCase(Locale.ROOT);
         for (String ext : config.getSkipExtensions()) {
-            if (p.endsWith(ext)) return true;
+            if (p.endsWith(ext))
+                return true;
         }
         return false;
     }
@@ -154,65 +159,88 @@ public class AydaScanner implements HttpHandler, ScannerControls {
     private boolean isPathExcluded(String path) {
         try {
             for (String rx : config.getPathExcludeRegex()) {
-                try { if (Pattern.compile(rx).matcher(path).find()) return true; }
-                catch (Exception ignored) {}
+                try {
+                    if (Pattern.compile(rx).matcher(path).find())
+                        return true;
+                } catch (Exception ignored) {
+                }
             }
-        } catch (Exception ignored) {}
+        } catch (Exception ignored) {
+        }
         return false;
     }
 
     private void processMatchNewAlgorithm(HttpRequest baseReq, HttpResponse baseResp, Match match, String scanKey) {
         try {
-            Map<String,String> baseline = ResponseExtractors.extractSignificant(baseResp, baseResp.bodyToString(), config.getIgnoredJsonKeys());
+            Map<String, String> baseline = ResponseExtractors.extractSignificant(baseResp, baseResp.bodyToString(),
+                    config.getIgnoredJsonKeys());
             try {
-                api.logging().logToOutput("AydaAydor DEBUG: baseline significant map (size=" + baseline.size() + ") " + baseline);
-            } catch (Throwable ignored) {}
+                api.logging().logToOutput(
+                        "AydaAydor DEBUG: baseline significant map (size=" + baseline.size() + ") " + baseline);
+            } catch (Throwable ignored) {
+            }
             int repeats = Math.max(0, config.getBaselineRepeatCount());
-            List<Map<String,String>> repeatMaps = new ArrayList<>();
+            List<Map<String, String>> repeatMaps = new ArrayList<>();
             for (int i = 0; i < repeats; i++) {
                 if (config.getDelayMsBetweenMutations() > 0) {
-                    try { Thread.sleep(config.getDelayMsBetweenMutations()); } catch (InterruptedException ie) { Thread.currentThread().interrupt(); }
+                    try {
+                        Thread.sleep(config.getDelayMsBetweenMutations());
+                    } catch (InterruptedException ie) {
+                        Thread.currentThread().interrupt();
+                    }
                 }
                 HttpRequestResponse rr = sendWithTimeout(baseReq);
                 HttpResponse rresp = rr.response();
                 if (rresp != null) {
-                    repeatMaps.add(ResponseExtractors.extractSignificant(rresp, rresp.bodyToString(), config.getIgnoredJsonKeys()));
+                    repeatMaps.add(ResponseExtractors.extractSignificant(rresp, rresp.bodyToString(),
+                            config.getIgnoredJsonKeys()));
                 }
             }
-            Map<String,String> stableBaseline = retainStableKeys(baseline, repeatMaps);
+            Map<String, String> stableBaseline = retainStableKeys(baseline, repeatMaps);
             try {
                 java.util.Set<String> removed = new java.util.LinkedHashSet<>(baseline.keySet());
                 removed.removeAll(stableBaseline.keySet());
-                api.logging().logToOutput("AydaAydor DEBUG: removed dynamic keys (count=" + removed.size() + "): " + removed);
-            } catch (Throwable ignored) {}
+                api.logging().logToOutput(
+                        "AydaAydor DEBUG: removed dynamic keys (count=" + removed.size() + "): " + removed);
+            } catch (Throwable ignored) {
+            }
             if (stableBaseline.isEmpty()) {
                 return;
             }
 
             IdGroup group = match.group;
-            Map<String, Map<String,String>> originalsById = findOriginalValuesForOtherIds(baseReq, match, stableBaseline.keySet());
+            Map<String, Map<String, String>> originalsById = findOriginalValuesForOtherIds(baseReq, match,
+                    stableBaseline.keySet());
 
             int processed = 0;
             for (String id : group.ids) {
-                if (id.equals(match.matchedId)) continue;
+                if (id.equals(match.matchedId))
+                    continue;
                 HttpRequest testReq = applyReplacement(baseReq, match, id);
                 if (config.getDelayMsBetweenMutations() > 0) {
-                    try { Thread.sleep(config.getDelayMsBetweenMutations()); } catch (InterruptedException ie) { Thread.currentThread().interrupt(); }
+                    try {
+                        Thread.sleep(config.getDelayMsBetweenMutations());
+                    } catch (InterruptedException ie) {
+                        Thread.currentThread().interrupt();
+                    }
                 }
                 HttpRequestResponse testRR = sendWithTimeout(testReq);
-                if (testRR == null || testRR.response() == null) continue;
+                if (testRR == null || testRR.response() == null)
+                    continue;
                 HttpResponse testResp = testRR.response();
-                Map<String,String> testMap = ResponseExtractors.extractSignificant(testResp, testResp.bodyToString(), config.getIgnoredJsonKeys());
+                Map<String, String> testMap = ResponseExtractors.extractSignificant(testResp, testResp.bodyToString(),
+                        config.getIgnoredJsonKeys());
 
                 // 7.1 unique original values found
-                Map<String,String> orig = originalsById.getOrDefault(id, Collections.emptyMap());
+                Map<String, String> orig = originalsById.getOrDefault(id, Collections.emptyMap());
                 List<String> uniqueHits = new ArrayList<>();
-                for (Map.Entry<String,String> e : stableBaseline.entrySet()) {
+                for (Map.Entry<String, String> e : stableBaseline.entrySet()) {
                     String k = e.getKey();
                     String baseVal = e.getValue();
                     String testVal = testMap.get(k);
                     String origVal = orig.get(k);
-                    if (testVal != null && origVal != null && !Objects.equals(baseVal, testVal) && Objects.equals(testVal, origVal)) {
+                    if (testVal != null && origVal != null && !Objects.equals(baseVal, testVal)
+                            && Objects.equals(testVal, origVal)) {
                         uniqueHits.add(k + " => '" + testVal + "'");
                     }
                 }
@@ -226,14 +254,16 @@ public class AydaScanner implements HttpHandler, ScannerControls {
 
                 // 7.2 per-key Jaccard similarity
                 List<String> lowSim = new ArrayList<>();
-                for (Map.Entry<String,String> e : stableBaseline.entrySet()) {
+                for (Map.Entry<String, String> e : stableBaseline.entrySet()) {
                     String k = e.getKey();
                     String baseVal = e.getValue();
                     String testVal = testMap.get(k);
-                    if (testVal == null) continue;
+                    if (testVal == null)
+                        continue;
                     double sim = jaccardSimilarity(baseVal, testVal);
                     if (sim < 0.8) {
-                        lowSim.add(k + " => base='" + baseVal + "' vs test='" + testVal + "' (sim=" + String.format(Locale.ROOT, "%.2f", sim) + ")");
+                        lowSim.add(k + " => base='" + baseVal + "' vs test='" + testVal + "' (sim="
+                                + String.format(Locale.ROOT, "%.2f", sim) + ")");
                     }
                 }
                 if (!lowSim.isEmpty()) {
@@ -245,7 +275,8 @@ public class AydaScanner implements HttpHandler, ScannerControls {
                 }
 
                 processed++;
-                if (processed >= Math.max(1, config.getMaxMutationsPerBase())) break;
+                if (processed >= Math.max(1, config.getMaxMutationsPerBase()))
+                    break;
             }
         } catch (Exception e) {
             api.logging().logToError("AydaAydor error: " + e);
@@ -254,27 +285,33 @@ public class AydaScanner implements HttpHandler, ScannerControls {
         }
     }
 
-    private Map<String,String> retainStableKeys(Map<String,String> baseline, List<Map<String,String>> repeats) {
-        if (baseline == null || baseline.isEmpty()) return Collections.emptyMap();
-        if (repeats == null || repeats.isEmpty()) return new LinkedHashMap<>(baseline);
-        Map<String,String> out = new LinkedHashMap<>();
-        outer: for (Map.Entry<String,String> e : baseline.entrySet()) {
-            String k = e.getKey(); String v = e.getValue();
-            for (Map<String,String> m : repeats) {
+    private Map<String, String> retainStableKeys(Map<String, String> baseline, List<Map<String, String>> repeats) {
+        if (baseline == null || baseline.isEmpty())
+            return Collections.emptyMap();
+        if (repeats == null || repeats.isEmpty())
+            return new LinkedHashMap<>(baseline);
+        Map<String, String> out = new LinkedHashMap<>();
+        outer: for (Map.Entry<String, String> e : baseline.entrySet()) {
+            String k = e.getKey();
+            String v = e.getValue();
+            for (Map<String, String> m : repeats) {
                 String vv = m.get(k);
-                if (!Objects.equals(v, vv)) continue outer;
+                if (!Objects.equals(v, vv))
+                    continue outer;
             }
             out.put(k, v);
         }
         return out;
     }
 
-    private Map<String, Map<String,String>> findOriginalValuesForOtherIds(HttpRequest baseReq, Match match, java.util.Set<String> keysOfInterest) {
-        Map<String, Map<String,String>> out = new LinkedHashMap<>();
+    private Map<String, Map<String, String>> findOriginalValuesForOtherIds(HttpRequest baseReq, Match match,
+            java.util.Set<String> keysOfInterest) {
+        Map<String, Map<String, String>> out = new LinkedHashMap<>();
         IdGroup group = match.group;
         List<String> others = group.ids.stream().filter(id -> !id.equals(match.matchedId)).collect(toList());
         Map<String, HttpRequest> expectedReqs = new LinkedHashMap<>();
-        for (String id : others) expectedReqs.put(id, applyReplacement(baseReq, match, id));
+        for (String id : others)
+            expectedReqs.put(id, applyReplacement(baseReq, match, id));
         for (Map.Entry<String, HttpRequest> en : expectedReqs.entrySet()) {
             String id = en.getKey();
             HttpRequest templ = en.getValue();
@@ -282,28 +319,39 @@ public class AydaScanner implements HttpHandler, ScannerControls {
             java.util.List<burp.api.montoya.proxy.ProxyHttpRequestResponse> filtered = api.proxy().history(rr -> {
                 try {
                     var r = rr.request();
-                    if (r == null) return false;
-                    if (!r.method().equalsIgnoreCase(templ.method())) return false;
+                    if (r == null)
+                        return false;
+                    if (!r.method().equalsIgnoreCase(templ.method()))
+                        return false;
                     return safe(r.pathWithoutQuery()).equals(safe(templ.pathWithoutQuery()));
-                } catch (Throwable t) { return false; }
+                } catch (Throwable t) {
+                    return false;
+                }
             });
             for (int idx = filtered.size() - 1; idx >= 0; idx--) { // newest first
                 var rr = filtered.get(idx);
                 var req = rr.request();
-                if (!paramCountsEqual(req, templ)) continue;
-                if (!idPresentSameLocation(req, id, match)) continue;
-                if (rr.response() == null) continue;
-                var map = ResponseExtractors.extractSignificant(rr.response(), rr.response().bodyToString(), config.getIgnoredJsonKeys());
-                Map<String,String> onlyKeys = new LinkedHashMap<>();
+                if (!paramCountsEqual(req, templ))
+                    continue;
+                if (!idPresentSameLocation(req, id, match))
+                    continue;
+                if (rr.response() == null)
+                    continue;
+                var map = ResponseExtractors.extractSignificant(rr.response(), rr.response().bodyToString(),
+                        config.getIgnoredJsonKeys());
+                Map<String, String> onlyKeys = new LinkedHashMap<>();
                 for (String k : keysOfInterest) {
                     String v = map.get(k);
-                    if (v != null) onlyKeys.put(k, v);
+                    if (v != null)
+                        onlyKeys.put(k, v);
                 }
                 if (!onlyKeys.isEmpty() && !out.containsKey(id)) {
                     out.put(id, onlyKeys);
                     try {
-                        api.logging().logToOutput("AydaAydor DEBUG: found original via Proxy.filter (id='" + id + "', filteredIndex=" + idx + ", url=" + req.url() + ")");
-                    } catch (Throwable ignored) {}
+                        api.logging().logToOutput("AydaAydor DEBUG: found original via Proxy.filter (id='" + id
+                                + "', filteredIndex=" + idx + ", url=" + req.url() + ")");
+                    } catch (Throwable ignored) {
+                    }
                 }
             }
         }
@@ -314,13 +362,16 @@ public class AydaScanner implements HttpHandler, ScannerControls {
         try {
             int aUrl = a.parameters(burp.api.montoya.http.message.params.HttpParameterType.URL).size();
             int bUrl = b.parameters(burp.api.montoya.http.message.params.HttpParameterType.URL).size();
-            if (aUrl != bUrl) return false;
+            if (aUrl != bUrl)
+                return false;
             int aBody = a.parameters(burp.api.montoya.http.message.params.HttpParameterType.BODY).size();
             int bBody = b.parameters(burp.api.montoya.http.message.params.HttpParameterType.BODY).size();
             int aMp = a.parameters(burp.api.montoya.http.message.params.HttpParameterType.MULTIPART_ATTRIBUTE).size();
             int bMp = b.parameters(burp.api.montoya.http.message.params.HttpParameterType.MULTIPART_ATTRIBUTE).size();
             return (aBody + aMp) == (bBody + bMp);
-        } catch (Throwable t) { return false; }
+        } catch (Throwable t) {
+            return false;
+        }
     }
 
     private boolean idPresentSameLocation(HttpRequest req, String id, Match match) {
@@ -338,16 +389,19 @@ public class AydaScanner implements HttpHandler, ScannerControls {
                 }
                 case HEADER: {
                     String val = req.headerValue(match.candidate.headerName);
-                    if (val == null) return false;
+                    if (val == null)
+                        return false;
                     String dec = match.chain.decodeAll(val);
                     return dec.contains(id);
                 }
                 case PATH_SEGMENT: {
                     String path = req.pathWithoutQuery();
-                    if (path == null) return false;
+                    if (path == null)
+                        return false;
                     String[] parts = path.split("/");
                     int idx = match.candidate.pathIndex;
-                    if (idx < 0 || idx >= parts.length) return false;
+                    if (idx < 0 || idx >= parts.length)
+                        return false;
                     String seg = parts[idx];
                     String dec = match.chain.decodeAll(seg);
                     return dec.contains(id);
@@ -362,15 +416,20 @@ public class AydaScanner implements HttpHandler, ScannerControls {
                 default:
                     return false;
             }
-        } catch (Throwable t) { return false; }
+        } catch (Throwable t) {
+            return false;
+        }
     }
 
     private double jaccardSimilarity(String a, String b) {
-        if (a == null && b == null) return 1.0;
-        if (a == null || b == null) return 0.0;
+        if (a == null && b == null)
+            return 1.0;
+        if (a == null || b == null)
+            return 0.0;
         java.util.Set<String> sa = tokenize(a);
         java.util.Set<String> sb = tokenize(b);
-        if (sa.isEmpty() && sb.isEmpty()) return 1.0;
+        if (sa.isEmpty() && sb.isEmpty())
+            return 1.0;
         java.util.Set<String> inter = new java.util.HashSet<>(sa);
         inter.retainAll(sb);
         java.util.Set<String> union = new java.util.HashSet<>(sa);
@@ -380,10 +439,12 @@ public class AydaScanner implements HttpHandler, ScannerControls {
 
     private java.util.Set<String> tokenize(String s) {
         java.util.Set<String> out = new java.util.LinkedHashSet<>();
-        if (s == null) return out;
+        if (s == null)
+            return out;
         for (String t : s.split("[^A-Za-z0-9]+")) {
             String n = t.trim().toLowerCase(Locale.ROOT);
-            if (!n.isEmpty()) out.add(n);
+            if (!n.isEmpty())
+                out.add(n);
         }
         return out;
     }
@@ -398,7 +459,8 @@ public class AydaScanner implements HttpHandler, ScannerControls {
             return f.get(timeout, TimeUnit.MILLISECONDS);
         } catch (TimeoutException te) {
             f.cancel(true);
-            // fabricate a response-like object? Keep it simple: return base request/empty response
+            // fabricate a response-like object? Keep it simple: return base request/empty
+            // response
             return api.http().sendRequest(req); // fallback without enforced timeout
         } catch (Exception e) {
             return api.http().sendRequest(req);
@@ -431,13 +493,15 @@ public class AydaScanner implements HttpHandler, ScannerControls {
     }
 
     private JsonElement pruneIgnoredJsonKeys(JsonElement node, Set<String> ignore) {
-        if (node == null || ignore == null || ignore.isEmpty()) return node;
+        if (node == null || ignore == null || ignore.isEmpty())
+            return node;
         if (node.isJsonObject()) {
             JsonObject obj = node.getAsJsonObject();
             JsonObject out = new JsonObject();
             for (Map.Entry<String, JsonElement> e : obj.entrySet()) {
                 String name = e.getKey();
-                if (ignore.contains(name)) continue;
+                if (ignore.contains(name))
+                    continue;
                 JsonElement child = pruneIgnoredJsonKeys(e.getValue(), ignore);
                 out.add(name, child);
             }
@@ -445,7 +509,8 @@ public class AydaScanner implements HttpHandler, ScannerControls {
         } else if (node.isJsonArray()) {
             JsonArray arr = node.getAsJsonArray();
             JsonArray out = new JsonArray();
-            for (JsonElement el : arr) out.add(pruneIgnoredJsonKeys(el, ignore));
+            for (JsonElement el : arr)
+                out.add(pruneIgnoredJsonKeys(el, ignore));
             return out;
         } else {
             return node;
@@ -453,9 +518,11 @@ public class AydaScanner implements HttpHandler, ScannerControls {
     }
 
     private boolean looksLikeJson(String s) {
-        if (s == null) return false;
+        if (s == null)
+            return false;
         String t = s.trim();
-        if (t.isEmpty()) return false;
+        if (t.isEmpty())
+            return false;
         char c = t.charAt(0);
         char e = t.charAt(t.length() - 1);
         return (c == '{' && e == '}') || (c == '[' && e == ']');
@@ -478,13 +545,17 @@ public class AydaScanner implements HttpHandler, ScannerControls {
     }
 
     private boolean containsAnyIgnoreCase(String haystack, List<String> needlesLower) {
-        if (haystack == null) return false;
+        if (haystack == null)
+            return false;
         String lower = haystack.toLowerCase();
-        for (String n : needlesLower) if (lower.contains(n)) return true;
+        for (String n : needlesLower)
+            if (lower.contains(n))
+                return true;
         return false;
     }
 
-    private void reportIssueNew(HttpRequest baseReq, HttpResponse baseResp, HttpRequestResponse evidence, Match match, String detail) {
+    private void reportIssueNew(HttpRequest baseReq, HttpResponse baseResp, HttpRequestResponse evidence, Match match,
+            String detail) {
         String name = "Potential IDOR (AydaAydor)";
         String remediation = "Enforce object-level authorization checks. Tie access to user/session, not identifiers.";
         String reportKey = computeReportKey(baseReq, match);
@@ -503,8 +574,7 @@ public class AydaScanner implements HttpHandler, ScannerControls {
                 null,
                 burp.api.montoya.scanner.audit.issues.AuditIssueSeverity.HIGH,
                 httpRequestResponse(baseReq, baseResp),
-                evidence
-        );
+                evidence);
         reported.mark(reportKey, System.currentTimeMillis());
         api.siteMap().add(issue);
         api.logging().logToOutput("AydaAydor: Reported IDOR at " + baseReq.url());
@@ -514,12 +584,12 @@ public class AydaScanner implements HttpHandler, ScannerControls {
         String method = req.method();
         String host = hostFromRequest(req);
         String path = safe(req.pathWithoutQuery());
-        String loc = locationKey(m);
-        String chain = m.chain.steps.toString();
-        String groupSig = groupSignature(m.group);
+        String loc = locationKey(m); // unique key that represents the type and name of the candidate
+        String chain = m.chain.steps.toString(); // type of encoding chain
+        String groupSig = groupSignature(m.group); // to track which IDs were in a group at the time of the scan
         StringBuilder sb = new StringBuilder();
         sb.append(method).append('|').append(host).append('|').append(path).append('|')
-          .append(loc).append('|').append(chain).append('|').append(groupSig);
+                .append(loc).append('|').append(chain).append('|').append(groupSig);
         return sb.toString();
     }
 
@@ -560,17 +630,22 @@ public class AydaScanner implements HttpHandler, ScannerControls {
     private String hostFromRequest(HttpRequest req) {
         try {
             for (HttpHeader h : req.headers()) {
-                if (h.name().equalsIgnoreCase("Host")) return h.value();
+                if (h.name().equalsIgnoreCase("Host"))
+                    return h.value();
             }
-        } catch (Exception ignored) {}
+        } catch (Exception ignored) {
+        }
         return "";
     }
 
-    private String safe(String s) { return s == null ? "" : s; }
+    private String safe(String s) {
+        return s == null ? "" : s;
+    }
 
     private String fastHash(String s) {
         // Reuse stableBodyHash logic for a simple, fast hash
-        if (s == null) return "0";
+        if (s == null)
+            return "0";
         String norm = s.trim();
         int h = 1125899907; // prime-like seed
         for (int i = 0; i < norm.length(); i++) {
@@ -580,10 +655,16 @@ public class AydaScanner implements HttpHandler, ScannerControls {
     }
 
     private boolean isIgnoredHeader(String name) {
-        if (name == null) return false;
+        if (name == null)
+            return false;
         String lower = name.trim().toLowerCase(Locale.ROOT);
-        if (IGNORED_HEADER_NAMES.contains(lower)) return true;
-        try { return config.getIgnoredHeaders().contains(lower); } catch (Exception ignored) { return false; }
+        if (IGNORED_HEADER_NAMES.contains(lower))
+            return true;
+        try {
+            return config.getIgnoredHeaders().contains(lower);
+        } catch (Exception ignored) {
+            return false;
+        }
     }
 
     private List<Match> findAllMatches(HttpRequest req, List<IdGroup> groups) {
@@ -592,14 +673,17 @@ public class AydaScanner implements HttpHandler, ScannerControls {
         // Parameters (all types including URL, BODY, JSON, COOKIE, MULTIPART_ATTRIBUTE)
         for (var p : req.parameters()) {
             try {
-                if (config.isParamIgnored(p.type(), p.name())) continue;
-            } catch (Throwable ignored) {}
+                if (config.isParamIgnored(p.type(), p.name()))
+                    continue;
+            } catch (Throwable ignored) {
+            }
             candidates.add(Candidate.forParam(p));
         }
         // Headers
         for (HttpHeader h : req.headers()) {
             String hn = h.name();
-            if (isIgnoredHeader(hn)) continue; // skip noisy/standard headers
+            if (isIgnoredHeader(hn))
+                continue; // skip noisy/standard headers
             candidates.add(Candidate.forHeader(hn, h.value()));
         }
         // Path segments
@@ -608,7 +692,10 @@ public class AydaScanner implements HttpHandler, ScannerControls {
             String[] parts = path.split("/");
             int idx = 0;
             for (String s : parts) {
-                if (s.isEmpty()) { idx++; continue; }
+                if (s.isEmpty()) {
+                    idx++;
+                    continue;
+                }
                 candidates.add(Candidate.forPathSegment(idx, s));
                 idx++;
             }
@@ -626,7 +713,8 @@ public class AydaScanner implements HttpHandler, ScannerControls {
             }
         }
 
-        // Try to match each candidate against group IDs (with decoders), collect all unique matches
+        // Try to match each candidate against group IDs (with decoders), collect all
+        // unique matches
         List<Match> out = new ArrayList<>();
         Set<String> seen = new HashSet<>();
         for (Candidate c : candidates) {
@@ -639,13 +727,15 @@ public class AydaScanner implements HttpHandler, ScannerControls {
                         String key;
                         if (o.reencodeWhole) {
                             modeTag = "D:" + o.decodedStart;
-                            key = c.type + "|" + c.value + "|" + g.name + "|" + id + "|" + o.chain.steps.toString() + "|" + modeTag;
+                            key = c.type + "|" + c.value + "|" + g.name + "|" + id + "|" + o.chain.steps.toString()
+                                    + "|" + modeTag;
                             if (seen.add(key)) {
                                 out.add(new Match(g, id, c, o.chain, o.decodedFull, o.decodedStart, true));
                             }
                         } else {
                             modeTag = "E:" + o.startIndex;
-                            key = c.type + "|" + c.value + "|" + g.name + "|" + id + "|" + o.chain.steps.toString() + "|" + modeTag;
+                            key = c.type + "|" + c.value + "|" + g.name + "|" + id + "|" + o.chain.steps.toString()
+                                    + "|" + modeTag;
                             if (seen.add(key)) {
                                 out.add(new Match(g, id, c, o.chain, o.fragment, o.startIndex));
                             }
@@ -690,7 +780,8 @@ public class AydaScanner implements HttpHandler, ScannerControls {
                 String path = req.path();
                 String[] parts = path.split("/");
                 int segIndex = match.candidate.pathIndex;
-                int i = 0; List<String> rebuilt = new ArrayList<>();
+                int i = 0;
+                List<String> rebuilt = new ArrayList<>();
                 for (String s : parts) {
                     if (i == segIndex && !s.isEmpty()) {
                         String newSeg;
@@ -703,7 +794,8 @@ public class AydaScanner implements HttpHandler, ScannerControls {
                             String encodedCore = match.chain.encode(mutated, segCore);
                             newSeg = encodedCore + suffix;
                         } else {
-                            String replacedCore = replaceAt(segCore, match.startIndex, match.encodedFragment.length(), encoded);
+                            String replacedCore = replaceAt(segCore, match.startIndex, match.encodedFragment.length(),
+                                    encoded);
                             newSeg = replacedCore + suffix;
                         }
                         rebuilt.add(newSeg);
@@ -713,7 +805,8 @@ public class AydaScanner implements HttpHandler, ScannerControls {
                     i++;
                 }
                 String newPath = String.join("/", rebuilt);
-                if (!newPath.startsWith("/")) newPath = "/" + newPath;
+                if (!newPath.startsWith("/"))
+                    newPath = "/" + newPath;
                 return req.withPath(newPath);
             }
             case RAW_QUERY: {
@@ -742,7 +835,8 @@ public class AydaScanner implements HttpHandler, ScannerControls {
         sb.append(original, 0, Math.max(0, start));
         sb.append(replacement);
         int end = Math.min(original.length(), start + Math.max(0, length));
-        if (end < original.length()) sb.append(original.substring(end));
+        if (end < original.length())
+            sb.append(original.substring(end));
         return sb.toString();
     }
 }
