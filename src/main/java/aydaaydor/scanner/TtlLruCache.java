@@ -25,7 +25,7 @@ class TtlLruCache {
         });
     }
 
-    boolean isFresh(String key, long now) {
+    boolean isFresh(String key, long now) { // method to check if a candidate was already scanned recently
         Long ts;
         synchronized (map) {
             ts = map.get(key);

@@ -30,7 +30,8 @@ public class AydaScanner implements HttpHandler, ScannerControls {
 
     private final MontoyaApi api;
     private final AydaConfig config;
-    private final ThreadPoolExecutor exec;
+    private final ThreadPoolExecutor exec; // the executor for match processing, does processMatchNewAlgorithm() on the
+                                           // output of findAllMatches()
     private final ExecutorService httpExec = Executors.newCachedThreadPool(r -> {
         Thread t = new Thread(r, "ayda-http");
         t.setDaemon(true);
@@ -127,11 +128,22 @@ public class AydaScanner implements HttpHandler, ScannerControls {
             return ResponseReceivedAction.continueWith(responseReceived);
         }
 
+        logParsedParameters(baseReq);
+        GraphQlContext graphQl = GraphQlContext.from(baseReq);
+        if (graphQl.isGraphQl) {
+            try {
+                api.logging().logToOutput("AydaAydor DEBUG: GraphQL detected operationName='"
+                        + graphQl.operationName + "' queryHash=" + graphQl.queryHash
+                        + " variables=" + graphQl.variables.keySet());
+            } catch (Throwable ignored) {
+            }
+        }
+
         // find all matching occurrences across all groups and scan each
         List<Match> matches = findAllMatches(baseReq, config.allGroups());
         long now = System.currentTimeMillis();
         for (Match m : matches) {
-            String scanKey = computeScanKey(baseReq, baseResp, m);
+            String scanKey = computeScanKey(baseReq, baseResp, m, graphQl);
             if (seen.isFresh(scanKey, now)) {
                 // recently scanned; skip
                 continue;
@@ -141,7 +153,7 @@ public class AydaScanner implements HttpHandler, ScannerControls {
                         + " matchedId='" + m.matchedId + "' location=" + m.locationDescription());
             } catch (Throwable ignored) {
             }
-            exec.submit(() -> processMatchNewAlgorithm(baseReq, baseResp, m, scanKey));
+            exec.submit(() -> processMatchNewAlgorithm(baseReq, baseResp, m, scanKey, graphQl));
         }
 
         return ResponseReceivedAction.continueWith(responseReceived);
@@ -170,7 +182,45 @@ public class AydaScanner implements HttpHandler, ScannerControls {
         return false;
     }
 
-    private void processMatchNewAlgorithm(HttpRequest baseReq, HttpResponse baseResp, Match match, String scanKey) {
+    private void logParsedParameters(HttpRequest req) {
+        try {
+            var params = req.parameters();
+            StringBuilder sb = new StringBuilder();
+            sb.append("AydaAydor DEBUG: parsed parameters for ")
+                    .append(req.method())
+                    .append(' ')
+                    .append(req.pathWithoutQuery())
+                    .append(" (count=")
+                    .append(params.size())
+                    .append(')');
+            int i = 0;
+            for (var p : params) {
+                sb.append("\n  [")
+                        .append(i++)
+                        .append("] type=")
+                        .append(p.type())
+                        .append(" name='")
+                        .append(p.name())
+                        .append("' value='")
+                        .append(truncateForLog(p.value(), 300))
+                        .append('\'');
+            }
+            api.logging().logToOutput(sb.toString());
+        } catch (Throwable ignored) {
+        }
+    }
+
+    private String truncateForLog(String value, int maxLen) {
+        if (value == null)
+            return "";
+        String normalized = value.replace("\r", "\\r").replace("\n", "\\n");
+        if (normalized.length() <= maxLen)
+            return normalized;
+        return normalized.substring(0, Math.max(0, maxLen)) + "...[truncated]";
+    }
+
+    private void processMatchNewAlgorithm(HttpRequest baseReq, HttpResponse baseResp, Match match, String scanKey,
+            GraphQlContext graphQl) {
         try {
             Map<String, String> baseline = ResponseExtractors.extractSignificant(baseResp, baseResp.bodyToString(),
                     config.getIgnoredJsonKeys());
@@ -181,6 +231,8 @@ public class AydaScanner implements HttpHandler, ScannerControls {
             }
             int repeats = Math.max(0, config.getBaselineRepeatCount());
             List<Map<String, String>> repeatMaps = new ArrayList<>();
+            // send the same baseline request multiple times to check for stable values and
+            // filter out dynamic non-significant values (e.g. timestamps)
             for (int i = 0; i < repeats; i++) {
                 if (config.getDelayMsBetweenMutations() > 0) {
                     try {
@@ -196,6 +248,7 @@ public class AydaScanner implements HttpHandler, ScannerControls {
                             config.getIgnoredJsonKeys()));
                 }
             }
+            // filter out dynamic non-significant values (e.g. timestamps)
             Map<String, String> stableBaseline = retainStableKeys(baseline, repeatMaps);
             try {
                 java.util.Set<String> removed = new java.util.LinkedHashSet<>(baseline.keySet());
@@ -210,7 +263,7 @@ public class AydaScanner implements HttpHandler, ScannerControls {
 
             IdGroup group = match.group;
             Map<String, Map<String, String>> originalsById = findOriginalValuesForOtherIds(baseReq, match,
-                    stableBaseline.keySet());
+                    stableBaseline.keySet(), graphQl);
 
             int processed = 0;
             for (String id : group.ids) {
@@ -249,7 +302,7 @@ public class AydaScanner implements HttpHandler, ScannerControls {
                             "Location: " + match.locationDescription() + "\n" +
                             "ID group: " + group.name + " -> tested ID='" + id + "'\n" +
                             "Keys matched original values (key => value):\n" + String.join("\n", uniqueHits);
-                    reportIssueNew(baseReq, baseResp, testRR, match, detail);
+                    reportIssueNew(baseReq, baseResp, testRR, match, detail, graphQl);
                 }
 
                 // 7.2 per-key Jaccard similarity
@@ -271,7 +324,7 @@ public class AydaScanner implements HttpHandler, ScannerControls {
                             "Location: " + match.locationDescription() + "\n" +
                             "ID group: " + group.name + " -> tested ID='" + id + "'\n" +
                             "Keys with similarity < 0.8:\n" + String.join("\n", lowSim);
-                    reportIssueNew(baseReq, baseResp, testRR, match, detail);
+                    reportIssueNew(baseReq, baseResp, testRR, match, detail, graphQl);
                 }
 
                 processed++;
@@ -286,6 +339,8 @@ public class AydaScanner implements HttpHandler, ScannerControls {
     }
 
     private Map<String, String> retainStableKeys(Map<String, String> baseline, List<Map<String, String>> repeats) {
+        // retain only keys that are stable across all repeats
+        // filter out dynamic non-significant values (e.g. timestamps)
         if (baseline == null || baseline.isEmpty())
             return Collections.emptyMap();
         if (repeats == null || repeats.isEmpty())
@@ -305,7 +360,19 @@ public class AydaScanner implements HttpHandler, ScannerControls {
     }
 
     private Map<String, Map<String, String>> findOriginalValuesForOtherIds(HttpRequest baseReq, Match match,
-            java.util.Set<String> keysOfInterest) {
+            java.util.Set<String> keysOfInterest, GraphQlContext graphQl) {
+        if (graphQl != null && graphQl.isGraphQl && isGraphQlVariableMatch(match, graphQl)) {
+            return findGraphQlOriginalValuesForOtherIds(baseReq, match, keysOfInterest, graphQl);
+        }
+
+        // the method takes all others identifiers in the current match group,
+        // searches the proxy history for responses in order to obtain reference values
+        // of significant response elements for these identifiers.
+        // Then these same identifiers are used for IDOR testing, but within another
+        // user’s session.
+        // If, after substituting an identifier into another user’s session,
+        // we get a response whose values match the reference ones, there is a high
+        // likelihood of an IDOR vulnerability.
         Map<String, Map<String, String>> out = new LinkedHashMap<>();
         IdGroup group = match.group;
         List<String> others = group.ids.stream().filter(id -> !id.equals(match.matchedId)).collect(toList());
@@ -352,6 +419,77 @@ public class AydaScanner implements HttpHandler, ScannerControls {
                                 + "', filteredIndex=" + idx + ", url=" + req.url() + ")");
                     } catch (Throwable ignored) {
                     }
+                }
+            }
+        }
+        return out;
+    }
+
+    private boolean isGraphQlVariableMatch(Match match, GraphQlContext graphQl) {
+        try {
+            if (match == null || graphQl == null || !graphQl.isGraphQl)
+                return false;
+            if (match.candidate.type != Candidate.Type.PARAMETER || match.candidate.param == null)
+                return false;
+            if (!"JSON".equals(match.candidate.param.type().name()))
+                return false;
+            String name = match.candidate.param.name();
+            return graphQl.variables.containsKey(name);
+        } catch (Throwable t) {
+            return false;
+        }
+    }
+
+    private Map<String, Map<String, String>> findGraphQlOriginalValuesForOtherIds(HttpRequest baseReq, Match match,
+            java.util.Set<String> keysOfInterest, GraphQlContext baseGraphQl) {
+        Map<String, Map<String, String>> out = new LinkedHashMap<>();
+        String variableName = match.candidate.param.name();
+        IdGroup group = match.group;
+        List<String> others = group.ids.stream().filter(id -> !id.equals(match.matchedId)).collect(toList());
+        for (String id : others) {
+            java.util.List<burp.api.montoya.proxy.ProxyHttpRequestResponse> filtered = api.proxy().history(rr -> {
+                try {
+                    var r = rr.request();
+                    if (r == null || rr.response() == null)
+                        return false;
+                    if (!r.method().equalsIgnoreCase(baseReq.method()))
+                        return false;
+                    if (!safe(r.pathWithoutQuery()).equals(safe(baseReq.pathWithoutQuery())))
+                        return false;
+                    GraphQlContext candidate = GraphQlContext.from(r);
+                    if (!candidate.isGraphQl)
+                        return false;
+                    if (!Objects.equals(candidate.operationName, baseGraphQl.operationName))
+                        return false;
+                    if (!Objects.equals(candidate.queryHash, baseGraphQl.queryHash))
+                        return false;
+                    if (!candidate.variables.keySet().equals(baseGraphQl.variables.keySet()))
+                        return false;
+                    return Objects.equals(candidate.variables.get(variableName), id);
+                } catch (Throwable t) {
+                    return false;
+                }
+            });
+            for (int idx = filtered.size() - 1; idx >= 0; idx--) {
+                var rr = filtered.get(idx);
+                var map = ResponseExtractors.extractSignificant(rr.response(), rr.response().bodyToString(),
+                        config.getIgnoredJsonKeys());
+                Map<String, String> onlyKeys = new LinkedHashMap<>();
+                for (String k : keysOfInterest) {
+                    String v = map.get(k);
+                    if (v != null)
+                        onlyKeys.put(k, v);
+                }
+                if (!onlyKeys.isEmpty()) {
+                    out.put(id, onlyKeys);
+                    try {
+                        api.logging().logToOutput("AydaAydor DEBUG: found GraphQL original via Proxy.filter (id='"
+                                + id + "', variable='" + variableName + "', operationName='"
+                                + baseGraphQl.operationName + "', queryHash=" + baseGraphQl.queryHash
+                                + ", filteredIndex=" + idx + ", url=" + rr.request().url() + ")");
+                    } catch (Throwable ignored) {
+                    }
+                    break;
                 }
             }
         }
@@ -555,10 +693,10 @@ public class AydaScanner implements HttpHandler, ScannerControls {
     }
 
     private void reportIssueNew(HttpRequest baseReq, HttpResponse baseResp, HttpRequestResponse evidence, Match match,
-            String detail) {
+            String detail, GraphQlContext graphQl) {
         String name = "Potential IDOR (AydaAydor)";
         String remediation = "Enforce object-level authorization checks. Tie access to user/session, not identifiers.";
-        String reportKey = computeReportKey(baseReq, match);
+        String reportKey = computeReportKey(baseReq, match, graphQl);
         if (reported.isFresh(reportKey, System.currentTimeMillis())) {
             return; // already reported recently
         }
@@ -580,7 +718,7 @@ public class AydaScanner implements HttpHandler, ScannerControls {
         api.logging().logToOutput("AydaAydor: Reported IDOR at " + baseReq.url());
     }
 
-    private String computeScanKey(HttpRequest req, HttpResponse baseResp, Match m) {
+    private String computeScanKey(HttpRequest req, HttpResponse baseResp, Match m, GraphQlContext graphQl) {
         String method = req.method();
         String host = hostFromRequest(req);
         String path = safe(req.pathWithoutQuery());
@@ -590,15 +728,24 @@ public class AydaScanner implements HttpHandler, ScannerControls {
         StringBuilder sb = new StringBuilder();
         sb.append(method).append('|').append(host).append('|').append(path).append('|')
                 .append(loc).append('|').append(chain).append('|').append(groupSig);
+        if (graphQl != null && graphQl.isGraphQl) {
+            sb.append("|GQL|").append(safe(graphQl.operationName)).append('|').append(safe(graphQl.queryHash));
+        }
         return sb.toString();
     }
 
-    private String computeReportKey(HttpRequest req, Match m) {
+    private String computeReportKey(HttpRequest req, Match m, GraphQlContext graphQl) {
         String method = req.method();
         String host = hostFromRequest(req);
         String path = safe(req.pathWithoutQuery());
         String loc = locationKey(m);
-        return method + '|' + host + '|' + path + '|' + loc + '|' + m.group.name;
+        StringBuilder sb = new StringBuilder();
+        sb.append(method).append('|').append(host).append('|').append(path).append('|')
+                .append(loc).append('|').append(m.group.name);
+        if (graphQl != null && graphQl.isGraphQl) {
+            sb.append("|GQL|").append(safe(graphQl.operationName)).append('|').append(safe(graphQl.queryHash));
+        }
+        return sb.toString();
     }
 
     private String locationKey(Match m) {
@@ -838,5 +985,89 @@ public class AydaScanner implements HttpHandler, ScannerControls {
         if (end < original.length())
             sb.append(original.substring(end));
         return sb.toString();
+    }
+}
+
+final class GraphQlContext {
+    final boolean isGraphQl;
+    final String operationName;
+    final String queryHash;
+    final Map<String, String> variables;
+
+    private GraphQlContext(boolean isGraphQl, String operationName, String queryHash, Map<String, String> variables) {
+        this.isGraphQl = isGraphQl;
+        this.operationName = operationName;
+        this.queryHash = queryHash;
+        this.variables = variables;
+    }
+
+    static GraphQlContext from(HttpRequest req) {
+        if (req == null)
+            return empty();
+        String operationName = null;
+        String query = null;
+        Map<String, String> variables = new LinkedHashMap<>();
+        try {
+            for (var p : req.parameters()) {
+                if (!"JSON".equals(p.type().name()))
+                    continue;
+                String name = p.name();
+                String value = p.value();
+                if ("operationName".equals(name)) {
+                    operationName = value;
+                } else if ("query".equals(name)) {
+                    query = value;
+                } else if (!"extensions".equals(name)) {
+                    variables.put(name, value);
+                }
+            }
+        } catch (Throwable t) {
+            return empty();
+        }
+
+        boolean hasGraphQlQuery = looksLikeGraphQlQuery(query);
+        boolean pathLooksGraphQl = false;
+        try {
+            String path = req.pathWithoutQuery();
+            pathLooksGraphQl = path != null && path.toLowerCase(Locale.ROOT).contains("graphql");
+        } catch (Throwable ignored) {
+        }
+        boolean isGraphQl = hasGraphQlQuery || (pathLooksGraphQl && (operationName != null || query != null));
+        if (!isGraphQl)
+            return empty();
+        return new GraphQlContext(true, operationName, hash(normalizeQuery(query)),
+                Collections.unmodifiableMap(new LinkedHashMap<>(variables)));
+    }
+
+    private static GraphQlContext empty() {
+        return new GraphQlContext(false, null, null, Collections.emptyMap());
+    }
+
+    private static boolean looksLikeGraphQlQuery(String query) {
+        if (query == null)
+            return false;
+        String q = query.trim();
+        if (q.isEmpty())
+            return false;
+        String lower = q.toLowerCase(Locale.ROOT);
+        return lower.startsWith("query ") || lower.startsWith("mutation ") || lower.startsWith("subscription ")
+                || lower.startsWith("{") || lower.contains(" query ") || lower.contains(" mutation ")
+                || lower.contains(" subscription ");
+    }
+
+    private static String normalizeQuery(String query) {
+        if (query == null)
+            return "";
+        return query.replaceAll("\\s+", " ").trim();
+    }
+
+    private static String hash(String s) {
+        if (s == null)
+            return "0";
+        int h = 1125899907;
+        for (int i = 0; i < s.length(); i++) {
+            h = (h * 16777619) ^ s.charAt(i);
+        }
+        return Integer.toHexString(h);
     }
 }
